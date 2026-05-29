@@ -10,60 +10,58 @@ interface BuilderState {
   name: string;
   itemCategory: string;
   itemRarity: string;
-  iLvlMin: string;
-  iLvlMax: string;
-  qualityMin: string;
-  qualityMax: string;
-  // Equipment
+  // Type Filters
+  iLvlMin: string; iLvlMax: string;
+  qualityMin: string; qualityMax: string;
+  // Equipment - Weapon
   dpsMin: string; dpsMax: string;
   pdpsMin: string; pdpsMax: string;
   edpsMin: string; edpsMax: string;
   apsMin: string; apsMax: string;
   critMin: string; critMax: string;
+  // Equipment - Armour
   armourMin: string; armourMax: string;
   evasionMin: string; evasionMax: string;
   esMin: string; esMax: string;
+  blockMin: string; blockMax: string;
+  spiritMin: string; spiritMax: string;
+  // Requirements
+  reqLvlMin: string; reqLvlMax: string;
+  reqStrMin: string; reqStrMax: string;
+  reqDexMin: string; reqDexMax: string;
+  reqIntMin: string; reqIntMax: string;
+  // Misc
+  corrupted: "any" | "true" | "false";
+  identified: "any" | "true" | "false";
+  mirrored: "any" | "true" | "false";
+  socketsMin: string; socketsMax: string;
+  linksMin: string; linksMax: string;
   // Trade
   priceMin: string;
   priceMax: string;
   priceCurrency: string;
   saleType: "any" | "instant" | "priced";
+  indexed: string;
+  // Meta
   statFilters: ActiveStatFilter[];
   watchLabel: string;
   thresholdAmount: string;
   thresholdCurrency: string;
 }
 
-interface ActiveStatFilter extends StatFilter {
-  displayText: string;
-  minStr: string;
-  maxStr: string;
-}
-
 const DEFAULT_STATE: BuilderState = {
-  name: "",
-  itemCategory: "",
-  itemRarity: "any",
-  iLvlMin: "",
-  iLvlMax: "",
-  qualityMin: "",
-  qualityMax: "",
-  dpsMin: "", dpsMax: "",
-  pdpsMin: "", pdpsMax: "",
-  edpsMin: "", edpsMax: "",
-  apsMin: "", apsMax: "",
-  critMin: "", critMax: "",
-  armourMin: "", armourMax: "",
-  evasionMin: "", evasionMax: "",
-  esMin: "", esMax: "",
-  priceMin: "",
-  priceMax: "",
-  priceCurrency: "divine",
-  saleType: "instant",
-  statFilters: [],
-  watchLabel: "",
-  thresholdAmount: "",
-  thresholdCurrency: "divine",
+  name: "", itemCategory: "", itemRarity: "any",
+  iLvlMin: "", iLvlMax: "", qualityMin: "", qualityMax: "",
+  dpsMin: "", dpsMax: "", pdpsMin: "", pdpsMax: "", edpsMin: "", edpsMax: "",
+  apsMin: "", apsMax: "", critMin: "", critMax: "",
+  armourMin: "", armourMax: "", evasionMin: "", evasionMax: "", esMin: "", esMax: "",
+  blockMin: "", blockMax: "", spiritMin: "", spiritMax: "",
+  reqLvlMin: "", reqLvlMax: "", reqStrMin: "", reqStrMax: "", reqDexMin: "", reqDexMax: "", reqIntMin: "", reqIntMax: "",
+  corrupted: "any", identified: "any", mirrored: "any",
+  socketsMin: "", socketsMax: "", linksMin: "", linksMax: "",
+  priceMin: "", priceMax: "", priceCurrency: "divine",
+  saleType: "instant", indexed: "any",
+  statFilters: [], watchLabel: "", thresholdAmount: "", thresholdCurrency: "divine",
 };
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -142,7 +140,15 @@ export function FilterBuilder() {
     const body: TradeSearchBody = {
       query: {
         status: { option: "any" },
-        filters: {},
+        filters: {
+          type_filters: { filters: {} },
+          weapon_filters: { filters: {} },
+          armour_filters: { filters: {} },
+          req_filters: { filters: {} },
+          socket_filters: { filters: {} },
+          misc_filters: { filters: {} },
+          trade_filters: { filters: {} },
+        },
         stats: [],
       },
       sort: { price: "asc" },
@@ -150,72 +156,83 @@ export function FilterBuilder() {
 
     if (form.name) body.query.name = form.name;
 
-    // Type / rarity
+    // Type Filters
+    const tf = body.query.filters!.type_filters!.filters;
+    if (form.itemCategory) tf.category = { option: form.itemCategory };
+    if (form.itemRarity !== "any") tf.rarity = { option: form.itemRarity };
+
+    // Misc Filters
+    const mf = body.query.filters!.misc_filters!.filters;
     const ilvlMin = parseInt(form.iLvlMin);
     const ilvlMax = parseInt(form.iLvlMax);
     const qualMin = parseInt(form.qualityMin);
     const qualMax = parseInt(form.qualityMax);
+    if (!isNaN(ilvlMin) || !isNaN(ilvlMax)) mf.ilvl = { min: ilvlMin || undefined, max: ilvlMax || undefined };
+    if (!isNaN(qualMin) || !isNaN(qualMax)) mf.quality = { min: qualMin || undefined, max: qualMax || undefined };
+    if (form.corrupted !== "any") mf.corrupted = { option: form.corrupted === "true" };
+    if (form.identified !== "any") mf.identified = { option: form.identified === "true" };
+    if (form.mirrored !== "any") mf.mirrored = { option: form.mirrored === "true" };
 
-    body.query.filters!.type_filters = {
-      filters: {
-        ...(form.itemCategory && { category: { option: form.itemCategory } }),
-        ...(form.itemRarity !== "any" && { rarity: { option: form.itemRarity } }),
-      },
-    };
+    // Equipment Filters - Weapon
+    const wf = body.query.filters!.weapon_filters!.filters;
+    const dps = { min: parseFloat(form.dpsMin), max: parseFloat(form.dpsMax) };
+    const pdps = { min: parseFloat(form.pdpsMin), max: parseFloat(form.pdpsMax) };
+    const edps = { min: parseFloat(form.edpsMin), max: parseFloat(form.edpsMax) };
+    const aps = { min: parseFloat(form.apsMin), max: parseFloat(form.apsMax) };
+    const crit = { min: parseFloat(form.critMin), max: parseFloat(form.critMax) };
+    if (!isNaN(dps.min!) || !isNaN(dps.max!)) wf.dps = { min: dps.min || undefined, max: dps.max || undefined };
+    if (!isNaN(pdps.min!) || !isNaN(pdps.max!)) wf.pdps = { min: pdps.min || undefined, max: pdps.max || undefined };
+    if (!isNaN(edps.min!) || !isNaN(edps.max!)) wf.edps = { min: edps.min || undefined, max: edps.max || undefined };
+    if (!isNaN(aps.min!) || !isNaN(aps.max!)) wf.aps = { min: aps.min || undefined, max: aps.max || undefined };
+    if (!isNaN(crit.min!) || !isNaN(crit.max!)) wf.crit = { min: crit.min || undefined, max: crit.max || undefined };
 
-    if (!isNaN(ilvlMin) || !isNaN(ilvlMax) || !isNaN(qualMin) || !isNaN(qualMax)) {
-      body.query.filters!.misc_filters = {
-        filters: {
-          ...((!isNaN(ilvlMin) || !isNaN(ilvlMax)) && { ilvl: { min: ilvlMin || undefined, max: ilvlMax || undefined } }),
-          ...((!isNaN(qualMin) || !isNaN(qualMax)) && { quality: { min: qualMin || undefined, max: qualMax || undefined } }),
-        },
-      };
-    }
+    // Equipment Filters - Armour
+    const af = body.query.filters!.armour_filters!.filters;
+    const ar = { min: parseFloat(form.armourMin), max: parseFloat(form.armourMax) };
+    const ev = { min: parseFloat(form.evasionMin), max: parseFloat(form.evasionMax) };
+    const es = { min: parseFloat(form.esMin), max: parseFloat(form.esMax) };
+    const block = { min: parseFloat(form.blockMin), max: parseFloat(form.blockMax) };
+    const spirit = { min: parseFloat(form.spiritMin), max: parseFloat(form.spiritMax) };
+    if (!isNaN(ar.min!) || !isNaN(ar.max!)) af.ar = { min: ar.min || undefined, max: ar.max || undefined };
+    if (!isNaN(ev.min!) || !isNaN(ev.max!)) af.ev = { min: ev.min || undefined, max: ev.max || undefined };
+    if (!isNaN(es.min!) || !isNaN(es.max!)) af.es = { min: es.min || undefined, max: es.max || undefined };
+    if (!isNaN(block.min!) || !isNaN(block.max!)) af.block = { min: block.min || undefined, max: block.max || undefined };
+    if (!isNaN(spirit.min!) || !isNaN(spirit.max!)) af.spirit = { min: spirit.min || undefined, max: spirit.max || undefined };
 
-    // Equipment filters
-    const e = {
-      dps: { min: parseFloat(form.dpsMin), max: parseFloat(form.dpsMax) },
-      pdps: { min: parseFloat(form.pdpsMin), max: parseFloat(form.pdpsMax) },
-      edps: { min: parseFloat(form.edpsMin), max: parseFloat(form.edpsMax) },
-      aps: { min: parseFloat(form.apsMin), max: parseFloat(form.apsMax) },
-      crit: { min: parseFloat(form.critMin), max: parseFloat(form.critMax) },
-      ar: { min: parseFloat(form.armourMin), max: parseFloat(form.armourMax) },
-      ev: { min: parseFloat(form.evasionMin), max: parseFloat(form.evasionMax) },
-      es: { min: parseFloat(form.esMin), max: parseFloat(form.esMax) },
-    };
+    // Requirement Filters
+    const rf = body.query.filters!.req_filters!.filters;
+    const reqLvl = { min: parseInt(form.reqLvlMin), max: parseInt(form.reqLvlMax) };
+    const reqStr = { min: parseInt(form.reqStrMin), max: parseInt(form.reqStrMax) };
+    const reqDex = { min: parseInt(form.reqDexMin), max: parseInt(form.reqDexMax) };
+    const reqInt = { min: parseInt(form.reqIntMin), max: parseInt(form.reqIntMax) };
+    if (!isNaN(reqLvl.min!) || !isNaN(reqLvl.max!)) rf.lvl = { min: reqLvl.min || undefined, max: reqLvl.max || undefined };
+    if (!isNaN(reqStr.min!) || !isNaN(reqStr.max!)) rf.str = { min: reqStr.min || undefined, max: reqStr.max || undefined };
+    if (!isNaN(reqDex.min!) || !isNaN(reqDex.max!)) rf.dex = { min: reqDex.min || undefined, max: reqDex.max || undefined };
+    if (!isNaN(reqInt.min!) || !isNaN(reqInt.max!)) rf.int = { min: reqInt.min || undefined, max: reqInt.max || undefined };
 
-    const hasEquip = Object.values(e).some(v => !isNaN(v.min!) || !isNaN(v.max!));
-    if (hasEquip) {
-      body.query.filters!.weapon_filters = { filters: {} };
-      body.query.filters!.armour_filters = { filters: {} };
-      
-      if (!isNaN(e.dps.min!) || !isNaN(e.dps.max!)) body.query.filters!.weapon_filters!.filters.dps = { min: e.dps.min || undefined, max: e.dps.max || undefined };
-      if (!isNaN(e.pdps.min!) || !isNaN(e.pdps.max!)) body.query.filters!.weapon_filters!.filters.pdps = { min: e.pdps.min || undefined, max: e.pdps.max || undefined };
-      if (!isNaN(e.edps.min!) || !isNaN(e.edps.max!)) body.query.filters!.weapon_filters!.filters.edps = { min: e.edps.min || undefined, max: e.edps.max || undefined };
-      if (!isNaN(e.aps.min!) || !isNaN(e.aps.max!)) body.query.filters!.weapon_filters!.filters.aps = { min: e.aps.min || undefined, max: e.aps.max || undefined };
-      if (!isNaN(e.crit.min!) || !isNaN(e.crit.max!)) body.query.filters!.weapon_filters!.filters.crit = { min: e.crit.min || undefined, max: e.crit.max || undefined };
-      
-      if (!isNaN(e.ar.min!) || !isNaN(e.ar.max!)) body.query.filters!.armour_filters!.filters.ar = { min: e.ar.min || undefined, max: e.ar.max || undefined };
-      if (!isNaN(e.ev.min!) || !isNaN(e.ev.max!)) body.query.filters!.armour_filters!.filters.ev = { min: e.ev.min || undefined, max: e.ev.max || undefined };
-      if (!isNaN(e.es.min!) || !isNaN(e.es.max!)) body.query.filters!.armour_filters!.filters.es = { min: e.es.min || undefined, max: e.es.max || undefined };
-    }
+    // Socket Filters
+    const sf = body.query.filters!.socket_filters!.filters;
+    const sockets = { min: parseInt(form.socketsMin), max: parseInt(form.socketsMax) };
+    const links = { min: parseInt(form.linksMin), max: parseInt(form.linksMax) };
+    if (!isNaN(sockets.min!) || !isNaN(sockets.max!)) sf.sockets = { min: sockets.min || undefined, max: sockets.max || undefined };
+    if (!isNaN(links.min!) || !isNaN(links.max!)) sf.links = { min: links.min || undefined, max: links.max || undefined };
 
-    // Price
+    // Trade Filters
+    const trf = body.query.filters!.trade_filters!.filters;
     const priceMin = parseFloat(form.priceMin);
     const priceMax = parseFloat(form.priceMax);
-    if (!isNaN(priceMin) || !isNaN(priceMax) || form.saleType !== "any") {
-      body.query.filters!.trade_filters = {
-        filters: {
-          price: {
-            ...(form.priceCurrency && { option: form.priceCurrency }),
-            ...(!isNaN(priceMin) && { min: priceMin }),
-            ...(!isNaN(priceMax) && { max: priceMax }),
-          },
-          ...(form.saleType !== "any" && {
-            sale_type: { option: form.saleType === "instant" ? "instant" : "priced" },
-          }),
-        },
+    if (!isNaN(priceMin) || !isNaN(priceMax)) {
+      trf.price = {
+        option: form.priceCurrency || undefined,
+        min: isNaN(priceMin) ? undefined : priceMin,
+        max: isNaN(priceMax) ? undefined : priceMax,
       };
+    }
+    if (form.saleType !== "any") {
+      trf.sale_type = { option: form.saleType === "instant" ? "instant" : "priced" };
+    }
+    if (form.indexed !== "any") {
+      trf.indexed = { option: form.indexed };
     }
 
     // Stat filters
@@ -232,6 +249,14 @@ export function FilterBuilder() {
         })),
       }];
     }
+
+    // Cleanup empty filter groups
+    Object.keys(body.query.filters!).forEach(key => {
+      const g = (body.query.filters as any)[key];
+      if (Object.keys(g.filters).length === 0) {
+        delete (body.query.filters as any)[key];
+      }
+    });
 
     return body;
   }, [form]);
@@ -302,135 +327,143 @@ export function FilterBuilder() {
         Filter
       </div>
 
-      {/* Item Name */}
+      {/* Basic Filters */}
       <div className="field-group">
         <label className="field-label">Item Name</label>
-        <input
-          className="field-input"
-          placeholder="e.g. Headhunter, Mageblood…"
-          value={form.name}
-          onChange={e => set("name", e.target.value)}
-        />
+        <input className="field-input" placeholder="e.g. Headhunter…"
+          value={form.name} onChange={e => set("name", e.target.value)} />
       </div>
 
-      {/* Category + Rarity */}
       <div className="field-row">
         <div className="field-group">
           <label className="field-label">Category</label>
           <select className="field-select" value={form.itemCategory} onChange={e => set("itemCategory", e.target.value)}>
             <option value="">Any</option>
-            {categoryOptions.map(o => (
-              <option key={o.value} value={o.value}>{o.label}</option>
-            ))}
+            {categoryOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
         </div>
         <div className="field-group">
           <label className="field-label">Rarity</label>
           <select className="field-select" value={form.itemRarity} onChange={e => set("itemRarity", e.target.value)}>
-            {["any","normal","magic","rare","unique"].map(r => (
-              <option key={r} value={r}>{r.charAt(0).toUpperCase() + r.slice(1)}</option>
-            ))}
+            {["any","normal","magic","rare","unique"].map(r => <option key={r} value={r}>{r.toUpperCase()}</option>)}
           </select>
         </div>
       </div>
 
-      {/* Sale type */}
+      <div className="field-row">
+        <div className="field-group">
+          <label className="field-label">iLvl Min</label>
+          <input className="field-input" type="number" value={form.iLvlMin} onChange={e => set("iLvlMin", e.target.value)} />
+        </div>
+        <div className="field-group">
+          <label className="field-label">iLvl Max</label>
+          <input className="field-input" type="number" value={form.iLvlMax} onChange={e => set("iLvlMax", e.target.value)} />
+        </div>
+      </div>
+
+      <div className="field-row">
+        <div className="field-group">
+          <label className="field-label">Quality Min</label>
+          <input className="field-input" type="number" value={form.qualityMin} onChange={e => set("qualityMin", e.target.value)} />
+        </div>
+        <div className="field-group">
+          <label className="field-label">Quality Max</label>
+          <input className="field-input" type="number" value={form.qualityMax} onChange={e => set("qualityMax", e.target.value)} />
+        </div>
+      </div>
+
+      {/* Equipment Filters - Weapon */}
+      <div className="section-sep">Weapon Filters</div>
+      <div className="field-row">
+        <div className="field-group"><label className="field-label">DPS Min</label>
+          <input className="field-input" type="number" value={form.dpsMin} onChange={e => set("dpsMin", e.target.value)} /></div>
+        <div className="field-group"><label className="field-label">DPS Max</label>
+          <input className="field-input" type="number" value={form.dpsMax} onChange={e => set("dpsMax", e.target.value)} /></div>
+      </div>
+      <div className="field-row">
+        <div className="field-group"><label className="field-label">PDPS Min</label>
+          <input className="field-input" type="number" value={form.pdpsMin} onChange={e => set("pdpsMin", e.target.value)} /></div>
+        <div className="field-group"><label className="field-label">EDPS Min</label>
+          <input className="field-input" type="number" value={form.edpsMin} onChange={e => set("edpsMin", e.target.value)} /></div>
+      </div>
+      <div className="field-row">
+        <div className="field-group"><label className="field-label">APS Min</label>
+          <input className="field-input" type="number" value={form.apsMin} onChange={e => set("apsMin", e.target.value)} /></div>
+        <div className="field-group"><label className="field-label">Crit Min</label>
+          <input className="field-input" type="number" value={form.critMin} onChange={e => set("critMin", e.target.value)} /></div>
+      </div>
+
+      {/* Equipment Filters - Armour */}
+      <div className="section-sep">Armour Filters</div>
+      <div className="field-row">
+        <div className="field-group"><label className="field-label">Armour Min</label>
+          <input className="field-input" type="number" value={form.armourMin} onChange={e => set("armourMin", e.target.value)} /></div>
+        <div className="field-group"><label className="field-label">Evasion Min</label>
+          <input className="field-input" type="number" value={form.evasionMin} onChange={e => set("evasionMin", e.target.value)} /></div>
+      </div>
+      <div className="field-row">
+        <div className="field-group"><label className="field-label">ES Min</label>
+          <input className="field-input" type="number" value={form.esMin} onChange={e => set("esMin", e.target.value)} /></div>
+        <div className="field-group"><label className="field-label">Block Min</label>
+          <input className="field-input" type="number" value={form.blockMin} onChange={e => set("blockMin", e.target.value)} /></div>
+      </div>
+
+      {/* Requirements */}
+      <div className="section-sep">Requirements</div>
+      <div className="field-row">
+        <div className="field-group"><label className="field-label">Lvl Min</label>
+          <input className="field-input" type="number" value={form.reqLvlMin} onChange={e => set("reqLvlMin", e.target.value)} /></div>
+        <div className="field-group"><label className="field-label">Str Min</label>
+          <input className="field-input" type="number" value={form.reqStrMin} onChange={e => set("reqStrMin", e.target.value)} /></div>
+      </div>
+
+      {/* Miscellaneous */}
+      <div className="section-sep">Miscellaneous</div>
+      <div className="field-row">
+        <div className="field-group">
+          <label className="field-label">Corrupted</label>
+          <select className="field-select" value={form.corrupted} onChange={e => set("corrupted", e.target.value as any)}>
+            <option value="any">Any</option><option value="true">Yes</option><option value="false">No</option>
+          </select>
+        </div>
+        <div className="field-group">
+          <label className="field-label">Sockets Min</label>
+          <input className="field-input" type="number" value={form.socketsMin} onChange={e => set("socketsMin", e.target.value)} />
+        </div>
+      </div>
+
+      {/* Trade Filters */}
+      <div className="section-sep">Trade Filters</div>
       <div className="field-group">
         <label className="field-label">Listing Type</label>
         <select className="field-select" value={form.saleType} onChange={e => set("saleType", e.target.value as any)}>
           <option value="any">Any</option>
-          <option value="instant">Instant Buyout (Merchant Tab) ⚡</option>
+          <option value="instant">Instant Buyout ⚡</option>
           <option value="priced">Priced (Whisper)</option>
         </select>
       </div>
 
-      {/* Price range */}
       <div className="field-row">
         <div className="field-group">
           <label className="field-label">Price Min</label>
-          <input className="field-input" type="number" min={0} placeholder="0"
-            value={form.priceMin} onChange={e => set("priceMin", e.target.value)} />
+          <input className="field-input" type="number" value={form.priceMin} onChange={e => set("priceMin", e.target.value)} />
         </div>
         <div className="field-group">
           <label className="field-label">Price Max</label>
-          <input className="field-input" type="number" min={0} placeholder="∞"
-            value={form.priceMax} onChange={e => set("priceMax", e.target.value)} />
+          <input className="field-input" type="number" value={form.priceMax} onChange={e => set("priceMax", e.target.value)} />
         </div>
       </div>
 
       <div className="field-group">
         <label className="field-label">Currency</label>
         <select className="field-select" value={form.priceCurrency} onChange={e => set("priceCurrency", e.target.value)}>
-          <option value="divine">Divine Orb</option>
-          <option value="exalted">Exalted Orb</option>
-          <option value="chaos">Chaos Orb</option>
-          <option value="gold">Gold</option>
-          <option value="regal-orb">Regal Orb</option>
-          <option value="orb-of-alteration">Orb of Alteration</option>
+          <option value="divine">Divine Orb</option><option value="exalted">Exalted Orb</option>
+          <option value="chaos">Chaos Orb</option><option value="gold">Gold</option>
         </select>
       </div>
 
-      {/* Item level & Quality */}
-      <div className="field-row">
-        <div className="field-group">
-          <label className="field-label">iLvl Min</label>
-          <input className="field-input" type="number" placeholder="1"
-            value={form.iLvlMin} onChange={e => set("iLvlMin", e.target.value)} />
-        </div>
-        <div className="field-group">
-          <label className="field-label">iLvl Max</label>
-          <input className="field-input" type="number" placeholder="100"
-            value={form.iLvlMax} onChange={e => set("iLvlMax", e.target.value)} />
-        </div>
-      </div>
-      <div className="field-row">
-        <div className="field-group">
-          <label className="field-label">Quality Min</label>
-          <input className="field-input" type="number" placeholder="0"
-            value={form.qualityMin} onChange={e => set("qualityMin", e.target.value)} />
-        </div>
-        <div className="field-group">
-          <label className="field-label">Quality Max</label>
-          <input className="field-input" type="number" placeholder="20"
-            value={form.qualityMax} onChange={e => set("qualityMax", e.target.value)} />
-        </div>
-      </div>
-
-      {/* Equipment Filters */}
-      <div className="section-sep">Equipment Filters</div>
-      <div className="field-row">
-        <div className="field-group">
-          <label className="field-label">DPS Min</label>
-          <input className="field-input" type="number" value={form.dpsMin} onChange={e => set("dpsMin", e.target.value)} />
-        </div>
-        <div className="field-group">
-          <label className="field-label">DPS Max</label>
-          <input className="field-input" type="number" value={form.dpsMax} onChange={e => set("dpsMax", e.target.value)} />
-        </div>
-      </div>
-      <div className="field-row">
-        <div className="field-group">
-          <label className="field-label">Armour Min</label>
-          <input className="field-input" type="number" value={form.armourMin} onChange={e => set("armourMin", e.target.value)} />
-        </div>
-        <div className="field-group">
-          <label className="field-label">Armour Max</label>
-          <input className="field-input" type="number" value={form.armourMax} onChange={e => set("armourMax", e.target.value)} />
-        </div>
-      </div>
-      <div className="field-row">
-        <div className="field-group">
-          <label className="field-label">ES Min</label>
-          <input className="field-input" type="number" value={form.esMin} onChange={e => set("esMin", e.target.value)} />
-        </div>
-        <div className="field-group">
-          <label className="field-label">ES Max</label>
-          <input className="field-input" type="number" value={form.esMax} onChange={e => set("esMax", e.target.value)} />
-        </div>
-      </div>
-
-      {/* Sale type */}
-      <div className="section-sep">Trade Filters</div>
+      {/* Stat filters */}
+      <div className="section-sep">Stat Filters</div>
 
       <div className="field-group" style={{ position: "relative" }}>
         <label className="field-label">Add Modifier</label>
