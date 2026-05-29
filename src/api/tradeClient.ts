@@ -88,7 +88,7 @@ async function request<T>(
 
   const headers: Record<string, string> = {
     "User-Agent": USER_AGENT,
-    "Cookie": `POESESSID=${poesessid}`,
+    "X-Session-Id": poesessid, // Use custom header to bypass browser restriction
     "X-Requested-With": "XMLHttpRequest",  // required by GGG trade API
   };
 

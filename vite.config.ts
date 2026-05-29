@@ -10,6 +10,16 @@ export default defineConfig({
         changeOrigin: true,
         headers: {
           'Referer': 'https://www.pathofexile.com/trade2/search/poe2/Standard',
+        },
+        configure: (proxy, _options) => {
+          proxy.on('proxyReq', (proxyReq, req, _res) => {
+            const sessionId = req.headers['x-session-id'];
+            if (sessionId) {
+              proxyReq.setHeader('Cookie', `POESESSID=${sessionId}`);
+              // Remove the custom header so it doesn't get sent to GGG
+              proxyReq.removeHeader('X-Session-Id');
+            }
+          });
         }
       }
     }
