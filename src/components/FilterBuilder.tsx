@@ -286,6 +286,7 @@ export function FilterBuilder() {
       }];
     }
 
+    console.log("Generated Search Payload:", JSON.stringify(body, null, 2));
     return body;
   }, [form]);
 
