@@ -179,127 +179,112 @@ export function FilterBuilder() {
 
   // Build the search body from form state
   const buildSearchBody = useCallback((): TradeSearchBody => {
+    const filters: any = {};
+
+    // Basic Type Filters
+    const type_filters: any = {};
+    if (form.itemCategory) type_filters.category = { option: form.itemCategory };
+    if (form.itemRarity !== "any") type_filters.rarity = { option: form.itemRarity };
+    if (Object.keys(type_filters).length > 0) filters.type_filters = { filters: type_filters };
+
+    // Misc Filters
+    const misc_filters: any = {};
+    const ilvlMin = parseInt(form.iLvlMin);
+    const ilvlMax = parseInt(form.iLvlMax);
+    const qualMin = parseInt(form.qualityMin);
+    const qualMax = parseInt(form.qualityMax);
+    if (!isNaN(ilvlMin) || !isNaN(ilvlMax)) misc_filters.ilvl = { min: ilvlMin || undefined, max: ilvlMax || undefined };
+    if (!isNaN(qualMin) || !isNaN(qualMax)) misc_filters.quality = { min: qualMin || undefined, max: qualMax || undefined };
+    if (form.corrupted !== "any") misc_filters.corrupted = { option: form.corrupted === "true" };
+    if (form.identified !== "any") misc_filters.identified = { option: form.identified === "true" };
+    if (form.mirrored !== "any") misc_filters.mirrored = { option: form.mirrored === "true" };
+    if (Object.keys(misc_filters).length > 0) filters.misc_filters = { filters: misc_filters };
+
+    // Weapon Filters
+    const weapon_filters: any = {};
+    const dps = { min: parseFloat(form.dpsMin), max: parseFloat(form.dpsMax) };
+    const pdps = { min: parseFloat(form.pdpsMin), max: parseFloat(form.pdpsMax) };
+    const edps = { min: parseFloat(form.edpsMin), max: parseFloat(form.edpsMax) };
+    const aps = { min: parseFloat(form.apsMin), max: parseFloat(form.apsMax) };
+    const crit = { min: parseFloat(form.critMin), max: parseFloat(form.critMax) };
+    if (!isNaN(dps.min!) || !isNaN(dps.max!)) weapon_filters.dps = { min: dps.min || undefined, max: dps.max || undefined };
+    if (!isNaN(pdps.min!) || !isNaN(pdps.max!)) weapon_filters.pdps = { min: pdps.min || undefined, max: pdps.max || undefined };
+    if (!isNaN(edps.min!) || !isNaN(edps.max!)) weapon_filters.edps = { min: edps.min || undefined, max: edps.max || undefined };
+    if (!isNaN(aps.min!) || !isNaN(aps.max!)) weapon_filters.aps = { min: aps.min || undefined, max: aps.max || undefined };
+    if (!isNaN(crit.min!) || !isNaN(crit.max!)) weapon_filters.crit = { min: crit.min || undefined, max: crit.max || undefined };
+    if (Object.keys(weapon_filters).length > 0) filters.weapon_filters = { filters: weapon_filters };
+
+    // Armour Filters
+    const armour_filters: any = {};
+    const ar = { min: parseFloat(form.armourMin), max: parseFloat(form.armourMax) };
+    const ev = { min: parseFloat(form.evasionMin), max: parseFloat(form.evasionMax) };
+    const es = { min: parseFloat(form.esMin), max: parseFloat(form.esMax) };
+    const block = { min: parseFloat(form.blockMin), max: parseFloat(form.blockMax) };
+    const spirit = { min: parseFloat(form.spiritMin), max: parseFloat(form.spiritMax) };
+    if (!isNaN(ar.min!) || !isNaN(ar.max!)) armour_filters.ar = { min: ar.min || undefined, max: ar.max || undefined };
+    if (!isNaN(ev.min!) || !isNaN(ev.max!)) armour_filters.ev = { min: ev.min || undefined, max: ev.max || undefined };
+    if (!isNaN(es.min!) || !isNaN(es.max!)) armour_filters.es = { min: es.min || undefined, max: es.max || undefined };
+    if (!isNaN(block.min!) || !isNaN(block.max!)) armour_filters.block = { min: block.min || undefined, max: block.max || undefined };
+    if (!isNaN(spirit.min!) || !isNaN(spirit.max!)) armour_filters.spirit = { min: spirit.min || undefined, max: spirit.max || undefined };
+    if (Object.keys(armour_filters).length > 0) filters.armour_filters = { filters: armour_filters };
+
+    // Req Filters
+    const req_filters: any = {};
+    const reqLvl = { min: parseInt(form.reqLvlMin), max: parseInt(form.reqLvlMax) };
+    const reqStr = { min: parseInt(form.reqStrMin), max: parseInt(form.reqStrMax) };
+    const reqDex = { min: parseInt(form.reqDexMin), max: parseInt(form.reqDexMax) };
+    const reqInt = { min: parseInt(form.reqIntMin), max: parseInt(form.reqIntMax) };
+    if (!isNaN(reqLvl.min!) || !isNaN(reqLvl.max!)) req_filters.lvl = { min: reqLvl.min || undefined, max: reqLvl.max || undefined };
+    if (!isNaN(reqStr.min!) || !isNaN(reqStr.max!)) req_filters.str = { min: reqStr.min || undefined, max: reqStr.max || undefined };
+    if (!isNaN(reqDex.min!) || !isNaN(reqDex.max!)) req_filters.dex = { min: reqDex.min || undefined, max: reqDex.max || undefined };
+    if (!isNaN(reqInt.min!) || !isNaN(reqInt.max!)) req_filters.int = { min: reqInt.min || undefined, max: reqInt.max || undefined };
+    if (Object.keys(req_filters).length > 0) filters.req_filters = { filters: req_filters };
+
+    // Socket Filters
+    const socket_filters: any = {};
+    const sockets = { min: parseInt(form.socketsMin), max: parseInt(form.socketsMax) };
+    if (!isNaN(sockets.min!) || !isNaN(sockets.max!)) socket_filters.sockets = { min: sockets.min || undefined, max: sockets.max || undefined };
+    if (Object.keys(socket_filters).length > 0) filters.socket_filters = { filters: socket_filters };
+
+    // Trade Filters
+    const trade_filters: any = {};
+    const priceMin = parseFloat(form.priceMin);
+    const priceMax = parseFloat(form.priceMax);
+    if (!isNaN(priceMin) || !isNaN(priceMax)) {
+      trade_filters.price = {
+        option: form.priceCurrency || "divine",
+        min: isNaN(priceMin) ? undefined : priceMin,
+        max: isNaN(priceMax) ? undefined : priceMax,
+      };
+    }
+    if (form.saleType !== "any") trade_filters.sale_type = { option: form.saleType };
+    if (form.indexed !== "any") trade_filters.indexed = { option: form.indexed };
+    if (Object.keys(trade_filters).length > 0) filters.trade_filters = { filters: trade_filters };
+
     const body: TradeSearchBody = {
       query: {
-        status: { option: "any" },
-        filters: {
-          type_filters: { filters: {} },
-          weapon_filters: { filters: {} },
-          armour_filters: { filters: {} },
-          req_filters: { filters: {} },
-          socket_filters: { filters: {} },
-          misc_filters: { filters: {} },
-          trade_filters: { filters: {} },
-        },
-        stats: [],
+        status: { option: "online" },
       },
       sort: { price: "asc" },
     };
 
     if (form.name) body.query.name = form.name;
     if (form.baseType) body.query.type = form.baseType;
+    if (Object.keys(filters).length > 0) body.query.filters = filters;
 
-    // Type Filters
-    const tf = body.query.filters!.type_filters!.filters;
-    if (form.itemCategory) tf.category = { option: form.itemCategory };
-    if (form.itemRarity !== "any") tf.rarity = { option: form.itemRarity };
-
-    // Misc Filters
-    const mf = body.query.filters!.misc_filters!.filters;
-    const ilvlMin = parseInt(form.iLvlMin);
-    const ilvlMax = parseInt(form.iLvlMax);
-    const qualMin = parseInt(form.qualityMin);
-    const qualMax = parseInt(form.qualityMax);
-    if (!isNaN(ilvlMin) || !isNaN(ilvlMax)) mf.ilvl = { min: ilvlMin || undefined, max: ilvlMax || undefined };
-    if (!isNaN(qualMin) || !isNaN(qualMax)) mf.quality = { min: qualMin || undefined, max: qualMax || undefined };
-    if (form.corrupted !== "any") mf.corrupted = { option: form.corrupted === "true" };
-    if (form.identified !== "any") mf.identified = { option: form.identified === "true" };
-    if (form.mirrored !== "any") mf.mirrored = { option: form.mirrored === "true" };
-
-    // Equipment Filters - Weapon
-    const wf = body.query.filters!.weapon_filters!.filters;
-    const dps = { min: parseFloat(form.dpsMin), max: parseFloat(form.dpsMax) };
-    const pdps = { min: parseFloat(form.pdpsMin), max: parseFloat(form.pdpsMax) };
-    const edps = { min: parseFloat(form.edpsMin), max: parseFloat(form.edpsMax) };
-    const aps = { min: parseFloat(form.apsMin), max: parseFloat(form.apsMax) };
-    const crit = { min: parseFloat(form.critMin), max: parseFloat(form.critMax) };
-    if (!isNaN(dps.min!) || !isNaN(dps.max!)) wf.dps = { min: dps.min || undefined, max: dps.max || undefined };
-    if (!isNaN(pdps.min!) || !isNaN(pdps.max!)) wf.pdps = { min: pdps.min || undefined, max: pdps.max || undefined };
-    if (!isNaN(edps.min!) || !isNaN(edps.max!)) wf.edps = { min: edps.min || undefined, max: edps.max || undefined };
-    if (!isNaN(aps.min!) || !isNaN(aps.max!)) wf.aps = { min: aps.min || undefined, max: aps.max || undefined };
-    if (!isNaN(crit.min!) || !isNaN(crit.max!)) wf.crit = { min: crit.min || undefined, max: crit.max || undefined };
-
-    // Equipment Filters - Armour
-    const af = body.query.filters!.armour_filters!.filters;
-    const ar = { min: parseFloat(form.armourMin), max: parseFloat(form.armourMax) };
-    const ev = { min: parseFloat(form.evasionMin), max: parseFloat(form.evasionMax) };
-    const es = { min: parseFloat(form.esMin), max: parseFloat(form.esMax) };
-    const block = { min: parseFloat(form.blockMin), max: parseFloat(form.blockMax) };
-    const spirit = { min: parseFloat(form.spiritMin), max: parseFloat(form.spiritMax) };
-    if (!isNaN(ar.min!) || !isNaN(ar.max!)) af.ar = { min: ar.min || undefined, max: ar.max || undefined };
-    if (!isNaN(ev.min!) || !isNaN(ev.max!)) af.ev = { min: ev.min || undefined, max: ev.max || undefined };
-    if (!isNaN(es.min!) || !isNaN(es.max!)) af.es = { min: es.min || undefined, max: es.max || undefined };
-    if (!isNaN(block.min!) || !isNaN(block.max!)) af.block = { min: block.min || undefined, max: block.max || undefined };
-    if (!isNaN(spirit.min!) || !isNaN(spirit.max!)) af.spirit = { min: spirit.min || undefined, max: spirit.max || undefined };
-
-    // Requirement Filters
-    const rf = body.query.filters!.req_filters!.filters;
-    const reqLvl = { min: parseInt(form.reqLvlMin), max: parseInt(form.reqLvlMax) };
-    const reqStr = { min: parseInt(form.reqStrMin), max: parseInt(form.reqStrMax) };
-    const reqDex = { min: parseInt(form.reqDexMin), max: parseInt(form.reqDexMax) };
-    const reqInt = { min: parseInt(form.reqIntMin), max: parseInt(form.reqIntMax) };
-    if (!isNaN(reqLvl.min!) || !isNaN(reqLvl.max!)) rf.lvl = { min: reqLvl.min || undefined, max: reqLvl.max || undefined };
-    if (!isNaN(reqStr.min!) || !isNaN(reqStr.max!)) rf.str = { min: reqStr.min || undefined, max: reqStr.max || undefined };
-    if (!isNaN(reqDex.min!) || !isNaN(reqDex.max!)) rf.dex = { min: reqDex.min || undefined, max: reqDex.max || undefined };
-    if (!isNaN(reqInt.min!) || !isNaN(reqInt.max!)) rf.int = { min: reqInt.min || undefined, max: reqInt.max || undefined };
-
-    // Socket Filters
-    const sf = body.query.filters!.socket_filters!.filters;
-    const sockets = { min: parseInt(form.socketsMin), max: parseInt(form.socketsMax) };
-    const links = { min: parseInt(form.linksMin), max: parseInt(form.linksMax) };
-    if (!isNaN(sockets.min!) || !isNaN(sockets.max!)) sf.sockets = { min: sockets.min || undefined, max: sockets.max || undefined };
-    if (!isNaN(links.min!) || !isNaN(links.max!)) sf.links = { min: links.min || undefined, max: links.max || undefined };
-
-    // Trade Filters
-    const trf = body.query.filters!.trade_filters!.filters;
-    const priceMin = parseFloat(form.priceMin);
-    const priceMax = parseFloat(form.priceMax);
-    if (!isNaN(priceMin) || !isNaN(priceMax)) {
-      trf.price = {
-        option: form.priceCurrency || undefined,
-        min: isNaN(priceMin) ? undefined : priceMin,
-        max: isNaN(priceMax) ? undefined : priceMax,
-      };
-    }
-    if (form.saleType !== "any") {
-      trf.sale_type = { option: form.saleType === "instant" ? "instant" : "priced" };
-    }
-    if (form.indexed !== "any") {
-      trf.indexed = { option: form.indexed };
-    }
-
-    // Stat filters
+    // Stats
     if (form.statFilters.length > 0) {
       body.query.stats = [{
         type: "and",
         filters: form.statFilters.map(s => ({
           id: s.id,
-          disabled: false,
           value: {
-            ...(!isNaN(parseFloat(s.minStr)) && { min: parseFloat(s.minStr) }),
-            ...(!isNaN(parseFloat(s.maxStr)) && { max: parseFloat(s.maxStr) }),
+            min: isNaN(parseFloat(s.minStr)) ? undefined : parseFloat(s.minStr),
+            max: isNaN(parseFloat(s.maxStr)) ? undefined : parseFloat(s.maxStr),
           },
         })),
       }];
     }
-
-    // Cleanup empty filter groups
-    Object.keys(body.query.filters!).forEach(key => {
-      const g = (body.query.filters as any)[key];
-      if (Object.keys(g.filters).length === 0) {
-        delete (body.query.filters as any)[key];
-      }
-    });
 
     return body;
   }, [form]);
