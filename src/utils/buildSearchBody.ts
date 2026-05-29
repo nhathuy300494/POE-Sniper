@@ -36,8 +36,7 @@ export interface FilterFormState {
   corrupted: "any" | "true" | "false";
   identified: "any" | "true" | "false";
   mirrored: "any" | "true" | "false";
-  socketsMin: string; socketsMax: string;
-  priceMin: string; priceMax: string;
+  socketsMin: string; priceMin: string; priceMax: string;
   priceCurrency: string;
   saleType: "any" | "instant" | "priced";
   indexed: string;
@@ -62,17 +61,16 @@ export const DEFAULT_FORM: FilterFormState = {
   statFilters: [], watchLabel: "", thresholdAmount: "", thresholdCurrency: "divine",
 };
 
-// parse float/int, undefined if NaN
 const pf = (s: string) => { const n = parseFloat(s); return isNaN(n) ? undefined : n; };
 const pi = (s: string) => { const n = parseInt(s); return isNaN(n) ? undefined : n; };
 
-// build {min, max} only if at least one defined
 const mm = (min?: number, max?: number) =>
   (min !== undefined || max !== undefined) ? { ...(min !== undefined && { min }), ...(max !== undefined && { max }) } : null;
 
 export function buildSearchBody(form: FilterFormState): TradeSearchBody {
+  // POE2: "instant" is a top-level status option, NOT a sale_type.
   const query: any = {
-    status: { option: "any" },
+    status: { option: form.saleType === "instant" ? "instant" : "online" },
   };
 
   if (form.name) query.name = form.name;
@@ -148,7 +146,10 @@ export function buildSearchBody(form: FilterFormState): TradeSearchBody {
       ...(pMax !== undefined && { max: pMax }),
     };
   }
-  if (form.saleType !== "any") trf.sale_type = { option: form.saleType };
+  // Valid sale_type in POE2: "any", "priced", "unpriced"
+  if (form.saleType === "priced" || form.saleType === "instant") {
+    trf.sale_type = { option: "priced" };
+  }
   if (form.indexed !== "any") trf.indexed = { option: form.indexed };
   if (Object.keys(trf).length) filters.trade_filters = { filters: trf };
 
