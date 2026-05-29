@@ -4,10 +4,52 @@ import type { TradeSearchBody, StatFilter, WatchConfig } from "../types/trade";
 import { useAppState } from "../store/appStore";
 import { searchItems, fetchItems } from "../api/tradeClient";
 
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const ITEM_CATEGORIES = [
+  { label: "Any Weapon", value: "weapon" },
+  { label: "One-Handed Melee", value: "weapon.one" },
+  { label: "Two-Handed Melee", value: "weapon.two" },
+  { label: "Bow", value: "weapon.bow" },
+  { label: "Claw", value: "weapon.claw" },
+  { label: "Dagger", value: "weapon.dagger" },
+  { label: "One-Handed Axe", value: "weapon.oneaxe" },
+  { label: "One-Handed Mace", value: "weapon.onemace" },
+  { label: "One-Handed Sword", value: "weapon.onesword" },
+  { label: "Sceptre", value: "weapon.sceptre" },
+  { label: "Staff", value: "weapon.staff" },
+  { label: "Two-Handed Axe", value: "weapon.twoaxe" },
+  { label: "Two-Handed Mace", value: "weapon.twomace" },
+  { label: "Two-Handed Sword", value: "weapon.twosword" },
+  { label: "Wand", value: "weapon.wand" },
+  { label: "Quarterstaff", value: "weapon.quarterstaff" },
+  { label: "Spear", value: "weapon.spear" },
+  { label: "Crossbow", value: "weapon.crossbow" },
+  { label: "Any Armour", value: "armour" },
+  { label: "Body Armour", value: "armour.chest" },
+  { label: "Boots", value: "armour.boots" },
+  { label: "Gloves", value: "armour.gloves" },
+  { label: "Helmets", value: "armour.helmet" },
+  { label: "Shields", value: "armour.shield" },
+  { label: "Quivers", value: "armour.quiver" },
+  { label: "Any Accessory", value: "accessory" },
+  { label: "Amulets", value: "accessory.amulet" },
+  { label: "Belts", value: "accessory.belt" },
+  { label: "Rings", value: "accessory.ring" },
+  { label: "Any Gem", value: "gem" },
+  { label: "Skill Gems", value: "gem.active" },
+  { label: "Support Gems", value: "gem.support" },
+  { label: "Jewel", value: "jewel" },
+  { label: "Flask", value: "flask" },
+  { label: "Waystone / Map", value: "map" },
+  { label: "Logbook", value: "logbook" },
+];
+
 // ─── Local state for the builder ─────────────────────────────────────────────
 
 interface BuilderState {
   name: string;
+  baseType: string;
   itemCategory: string;
   itemRarity: string;
   // Type Filters
@@ -50,7 +92,7 @@ interface BuilderState {
 }
 
 const DEFAULT_STATE: BuilderState = {
-  name: "", itemCategory: "", itemRarity: "any",
+  name: "", baseType: "", itemCategory: "", itemRarity: "any",
   iLvlMin: "", iLvlMax: "", qualityMin: "", qualityMax: "",
   dpsMin: "", dpsMax: "", pdpsMin: "", pdpsMax: "", edpsMin: "", edpsMax: "",
   apsMin: "", apsMax: "", critMin: "", critMax: "",
@@ -155,6 +197,7 @@ export function FilterBuilder() {
     };
 
     if (form.name) body.query.name = form.name;
+    if (form.baseType) body.query.type = form.baseType;
 
     // Type Filters
     const tf = body.query.filters!.type_filters!.filters;
@@ -334,12 +377,18 @@ export function FilterBuilder() {
           value={form.name} onChange={e => set("name", e.target.value)} />
       </div>
 
+      <div className="field-group">
+        <label className="field-label">Base Type (e.g. Broadsword)</label>
+        <input className="field-input" placeholder="Search base types…"
+          value={form.baseType} onChange={e => set("baseType", e.target.value)} />
+      </div>
+
       <div className="field-row">
         <div className="field-group">
           <label className="field-label">Category</label>
           <select className="field-select" value={form.itemCategory} onChange={e => set("itemCategory", e.target.value)}>
             <option value="">Any</option>
-            {categoryOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            {ITEM_CATEGORIES.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
         </div>
         <div className="field-group">
