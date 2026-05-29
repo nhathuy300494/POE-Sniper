@@ -100,7 +100,7 @@ export async function searchItems(
   const clean = league.replace(/^poe2\//, "");
   return request<SearchResponse>(
     "POST",
-    `/api/trade2/search/poe2/${encodeURIComponent(clean)}`,
+    `/api/trade2/search/${encodeURIComponent(clean)}`,
     poesessid,
     body,
     searchLimiter
@@ -136,7 +136,7 @@ export async function refreshSearch(searchId: string, league: string, poesessid:
   const clean = league.replace(/^poe2\//, "");
   return request<SearchResponse>(
     "GET",
-    `/api/trade2/search/poe2/${encodeURIComponent(clean)}/${searchId}`,
+    `/api/trade2/search/${encodeURIComponent(clean)}/${searchId}`,
     poesessid,
     undefined,
     searchLimiter
