@@ -17,7 +17,7 @@ import type {
   ListingResult,
 } from "../types/trade";
 
-const BASE = "https://www.pathofexile.com";
+const BASE = "";
 
 // GGG asks all third-party tools to identify themselves
 const USER_AGENT = "poe2-trade-sniper/1.0.0 (contact: your@email.com)";
