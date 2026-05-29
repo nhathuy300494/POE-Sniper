@@ -132,11 +132,10 @@ export async function searchItems(
   body: TradeSearchBody,
   poesessid: string
 ): Promise<SearchResponse> {
-  // POE2 API requires the realm prefix in the league path
-  const realmLeague = league.startsWith("poe2/") ? league : `poe2/${league}`;
+  const cleanLeague = league.startsWith("poe2/") ? league.replace("poe2/", "") : league;
   return request<SearchResponse>(
     "POST",
-    `/api/trade2/search/${encodeURIComponent(realmLeague)}`,
+    `/api/trade2/search/poe2/${encodeURIComponent(cleanLeague)}`,
     poesessid,
     body,
     searchLimiter
@@ -209,11 +208,11 @@ export async function refreshSearch(
   league: string,
   poesessid: string
 ): Promise<SearchResponse> {
-  const realmLeague = league.startsWith("poe2/") ? league : `poe2/${league}`;
+  const cleanLeague = league.startsWith("poe2/") ? league.replace("poe2/", "") : league;
   // Re-fetching the search URL gives us fresh results
   return request<SearchResponse>(
     "GET",
-    `/api/trade2/search/${encodeURIComponent(realmLeague)}/${searchId}`,
+    `/api/trade2/search/poe2/${encodeURIComponent(cleanLeague)}/${searchId}`,
     poesessid,
     undefined,
     searchLimiter

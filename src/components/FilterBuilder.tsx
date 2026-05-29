@@ -264,6 +264,7 @@ export function FilterBuilder() {
     const body: TradeSearchBody = {
       query: {
         status: { option: "online" },
+        stats: [],
       },
       sort: { price: "asc" },
     };
