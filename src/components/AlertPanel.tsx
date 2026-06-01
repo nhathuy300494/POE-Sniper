@@ -41,8 +41,8 @@ export function AlertPanel() {
               </div>
             </div>
             <div className="alert-btns">
-              {alert.listing.listing.method === "merchant" && (
-                <button className="btn btn-primary btn-sm" onClick={() => handleTravel(alert.listing.listing.whisper_token)}>
+              {alert.listing.listing.method === "merchant" && (alert.listing.listing.whisper_token || alert.listing.listing.hideout_token) && (
+                <button className="btn btn-primary btn-sm" onClick={() => handleTravel(alert.listing.listing.whisper_token || alert.listing.listing.hideout_token!)}>
                   ⚡ Travel
                 </button>
               )}

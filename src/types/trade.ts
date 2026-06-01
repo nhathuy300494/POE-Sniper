@@ -6,7 +6,7 @@ export interface TradeSearchBody {
 }
 
 export interface TradeQuery {
-  status?: { option: "online" | "onlineleague" | "any" };
+  status?: { option: "online" | "onlineleague" | "any" | "available" | "securable" };
   name?: string;          // unique item name
   type?: string;          // base type
   filters?: TradeFilters;
@@ -19,13 +19,22 @@ export interface TradeFilters {
     filters: {
       quality?: MinMax;
       ilvl?: MinMax;
+      dps?: MinMax;
+      pdps?: MinMax;
+      edps?: MinMax;
+      aps?: MinMax;
+      crit?: MinMax;
+      ar?: MinMax;
+      ev?: MinMax;
+      es?: MinMax;
+      block?: MinMax;
+      spirit?: MinMax;
     };
   };
   trade_filters?: {
     filters: {
       price?: { min?: number; max?: number; option?: string }; // option = currency type
       indexed?: { option: string };
-      sale_type?: { option: "priced" | "instant" };           // instant = Merchant Tab only
     };
   };
   socket_filters?: { filters: { sockets?: MinMax; links?: MinMax } };
@@ -71,7 +80,8 @@ export interface ListingResult {
     indexed: string;               // ISO8601
     stash?: { name: string; x: number; y: number };
     whisper: string;               // legacy whisper text
-    whisper_token: string;         // token used for /api/trade2/whisper POST
+    whisper_token?: string;        // token used for /api/trade2/whisper POST
+    hideout_token?: string;        // alternative token for travel
     account: {
       name: string;
       lastCharacterName: string;
@@ -107,7 +117,7 @@ export interface PoeItem {
   properties?: Array<{ name: string; values: [string, number][] }>;
   extended?: {
     dps?: number; pdps?: number; edps?: number;
-    ar?: number; ev?: number; es?: number;
+    ar?: number; ev?: number; es?: number; ward?: number;
   };
 }
 
@@ -125,19 +135,23 @@ export interface WatchConfig {
   searchBody: TradeSearchBody;
   threshold: {
     amount: number;
-    currency: CurrencyType;
+    currency: string;
   };
+  mode: "auto" | "report";
+  pollIntervalMs: number;
   createdAt: number;
   lastChecked?: number;
   lastResult?: ListingResult[];
+  lastHit?: ListingResult;
   status: "active" | "paused" | "triggered";
 }
 
 export interface AppSettings {
   poesessid: string;
   league: string;
-  pollIntervalMs: number;   // default 5000
-  maxWatches: number;       // default 3 (rate limit safe)
+  pollIntervalMs: number;   // default 10000 (10s)
+  maxWatches: number;       // default 3
+  automationMode: "auto" | "report"; // default global mode
 }
 
 export interface StatMeta {

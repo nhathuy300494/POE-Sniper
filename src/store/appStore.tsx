@@ -16,6 +16,13 @@ export interface LiveResult {
   updatedAt: number;
   error?: string;
   rateLimitedUntil?: number;
+  priceHistory?: PricePoint[];
+}
+
+export interface PricePoint {
+  time: number;
+  amount: number;
+  currency: string;
 }
 
 export interface AppState {
@@ -35,9 +42,10 @@ export interface Alert {
 
 const DEFAULT_SETTINGS: AppSettings = {
   poesessid: "",
-  league: "Standard",
+  league: "poe2/Runes of Aldur",
   pollIntervalMs: 10_000,
   maxWatches: 3,
+  automationMode: "report",
 };
 
 // ─── Actions ──────────────────────────────────────────────────────────────────
@@ -45,6 +53,7 @@ const DEFAULT_SETTINGS: AppSettings = {
 type Action =
   | { type: "SET_SETTINGS"; payload: Partial<AppSettings> }
   | { type: "ADD_WATCH"; payload: WatchConfig }
+  | { type: "UPDATE_WATCH"; payload: { id: string; patch: Partial<WatchConfig> } }
   | { type: "REMOVE_WATCH"; payload: string }
   | { type: "UPDATE_WATCH_STATUS"; payload: { id: string; status: WatchConfig["status"] } }
   | { type: "SET_LIVE_RESULT"; payload: LiveResult }
@@ -60,6 +69,14 @@ function reducer(state: AppState, action: Action): AppState {
     case "ADD_WATCH":
       return { ...state, watches: [...state.watches, action.payload] };
 
+    case "UPDATE_WATCH":
+      return {
+        ...state,
+        watches: state.watches.map(w =>
+          w.id === action.payload.id ? { ...w, ...action.payload.patch } : w
+        ),
+      };
+
     case "REMOVE_WATCH":
       return { ...state, watches: state.watches.filter(w => w.id !== action.payload) };
 
@@ -71,11 +88,26 @@ function reducer(state: AppState, action: Action): AppState {
         ),
       };
 
-    case "SET_LIVE_RESULT":
+    case "SET_LIVE_RESULT": {
+      const previous = state.liveResults[action.payload.watchId];
+      const nextPoint = action.payload.cheapest
+        ? {
+            time: action.payload.updatedAt,
+            amount: action.payload.cheapest.listing.price.amount,
+            currency: action.payload.cheapest.listing.price.currency,
+          }
+        : null;
+      const priceHistory = nextPoint
+        ? [...(previous?.priceHistory || []), nextPoint].slice(-120)
+        : previous?.priceHistory || [];
       return {
         ...state,
-        liveResults: { ...state.liveResults, [action.payload.watchId]: action.payload },
+        liveResults: {
+          ...state.liveResults,
+          [action.payload.watchId]: { ...previous, ...action.payload, priceHistory },
+        },
       };
+    }
 
     case "ADD_ALERT":
       return { ...state, alerts: [action.payload, ...state.alerts].slice(0, 50) };
@@ -104,7 +136,8 @@ interface AppContextValue {
   addWatch: (config: WatchConfig) => { ok: boolean; error?: string };
   removeWatch: (id: string) => void;
   pauseWatch: (id: string) => void;
-  resumeWatch: (id: string) => void;
+  resumeWatch: (id: string) => { ok: boolean; error?: string };
+  updateWatch: (id: string, patch: Partial<WatchConfig>) => { ok: boolean; error?: string };
   saveSettings: (s: Partial<AppSettings>) => void;
 }
 
@@ -113,10 +146,16 @@ const AppContext = createContext<AppContextValue | null>(null);
 export function AppProvider({ children }: { children: React.ReactNode }) {
   const [state, dispatch] = useReducer(reducer, {
     settings: loadSettings(),
-    watches: [],
-    liveResults: {},
+    watches: loadWatches(),
+    liveResults: loadLiveResults(),
     alerts: [],
   });
+
+  useEffect(() => {
+    state.watches.forEach(watch => {
+      watcherEngine.addWatch(watch);
+    });
+  }, []);
 
   // Wire up watcher engine events → dispatch
   useEffect(() => {
@@ -144,10 +183,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               seenAt: Date.now(),
               dismissed: false,
             },
-          });
-          dispatch({
-            type: "UPDATE_WATCH_STATUS",
-            payload: { id: event.watchId, status: "triggered" },
           });
           // Browser notification
           showDesktopNotification(event.watchId, event.listing);
@@ -196,9 +231,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     watcherEngine.configure({
       poesessid: state.settings.poesessid,
       pollIntervalMs: state.settings.pollIntervalMs,
-      maxWatches: state.settings.maxWatches,
     });
   }, [state.settings]);
+
+  useEffect(() => {
+    persistWatches(state.watches);
+  }, [state.watches]);
+
+  useEffect(() => {
+    persistLiveResults(state.liveResults);
+  }, [state.liveResults]);
 
   const addWatch = (config: WatchConfig) => {
     const result = watcherEngine.addWatch(config);
@@ -219,8 +261,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   };
 
   const resumeWatch = (id: string) => {
-    watcherEngine.resumeWatch(id);
+    const watch = state.watches.find(w => w.id === id);
+    if (!watch) return { ok: false, error: "Watch not found" };
+    const result = watcherEngine.resumeWatch(id);
+    if (!result.ok) return result;
     dispatch({ type: "UPDATE_WATCH_STATUS", payload: { id, status: "active" } });
+    return { ok: true };
+  };
+
+  const updateWatch = (id: string, patch: Partial<WatchConfig>) => {
+    const result = watcherEngine.updateWatch(id, patch);
+    if (!result.ok) return result;
+    dispatch({ type: "UPDATE_WATCH", payload: { id, patch } });
+    return { ok: true };
   };
 
   const saveSettings = (partial: Partial<AppSettings>) => {
@@ -229,7 +282,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   };
 
   return (
-    <AppContext.Provider value={{ state, dispatch, addWatch, removeWatch, pauseWatch, resumeWatch, saveSettings }}>
+    <AppContext.Provider value={{ state, dispatch, addWatch, removeWatch, pauseWatch, resumeWatch, updateWatch, saveSettings }}>
       {children}
     </AppContext.Provider>
   );
@@ -254,6 +307,57 @@ function loadSettings(): AppSettings {
 function persistSettings(s: AppSettings) {
   try {
     localStorage.setItem("poe2sniper:settings", JSON.stringify(s));
+  } catch { /* ignore */ }
+}
+
+function loadWatches(): WatchConfig[] {
+  try {
+    const raw = localStorage.getItem("poe2sniper:watches");
+    if (!raw) return [];
+    return JSON.parse(raw).map((watch: WatchConfig) => ({
+      ...watch,
+      status: watch.status === "active" ? "paused" : watch.status,
+      pollIntervalMs: watch.pollIntervalMs || 10_000,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+function persistWatches(watches: WatchConfig[]) {
+  try {
+    localStorage.setItem("poe2sniper:watches", JSON.stringify(watches));
+  } catch { /* ignore */ }
+}
+
+function loadLiveResults(): Record<string, LiveResult> {
+  try {
+    const raw = localStorage.getItem("poe2sniper:price-history");
+    if (!raw) return {};
+    const histories = JSON.parse(raw) as Record<string, PricePoint[]>;
+    return Object.fromEntries(Object.entries(histories).map(([watchId, priceHistory]) => [
+      watchId,
+      {
+        watchId,
+        listings: [],
+        cheapest: null,
+        updatedAt: priceHistory.at(-1)?.time || Date.now(),
+        priceHistory,
+      },
+    ]));
+  } catch {
+    return {};
+  }
+}
+
+function persistLiveResults(liveResults: Record<string, LiveResult>) {
+  try {
+    const histories = Object.fromEntries(
+      Object.entries(liveResults)
+        .filter(([, result]) => result.priceHistory?.length)
+        .map(([watchId, result]) => [watchId, result.priceHistory])
+    );
+    localStorage.setItem("poe2sniper:price-history", JSON.stringify(histories));
   } catch { /* ignore */ }
 }
 

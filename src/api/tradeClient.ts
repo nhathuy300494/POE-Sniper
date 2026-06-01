@@ -10,9 +10,10 @@ import type {
   FetchResponse,
   ListingResult,
 } from "../types/trade";
+import { normalizePoeCookieInput } from "../utils/cookies";
 
 const BASE = "";
-const USER_AGENT = "poe2-trade-sniper/1.0.0 (contact: your@email.com)";
+const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
 
 export class TradeApiError extends Error {
   constructor(message: string, public status: number, public body?: unknown) {
@@ -47,21 +48,45 @@ const searchLimiter = new RateLimiter(10, 60_000);
 const fetchLimiter  = new RateLimiter(50, 60_000);
 const whisperLimiter = new RateLimiter(4, 60_000);
 
+function ensurePoe2(league: string) {
+  if (!league) return "poe2/Standard";
+  if (league.startsWith("poe2/")) return league;
+  return `poe2/${league}`;
+}
+
 async function request<T>(
   method: "GET" | "POST",
   path: string,
   poesessid: string,
   body?: unknown,
-  limiter?: RateLimiter
+  limiter?: RateLimiter,
+  searchId?: string,
+  league?: string
 ): Promise<T> {
   if (limiter && !limiter.canRequest()) {
     throw new RateLimitError(Math.ceil(limiter.msUntilNext() / 1000));
   }
 
+  // league can be like "poe2/Runes of Aldur" or "Runes of Aldur"
+  const rawLeague = league || "Runes of Aldur";
+  const currentLeague = ensurePoe2(rawLeague);
+
   const headers: Record<string, string> = {
     "User-Agent": USER_AGENT,
-    "X-Session-Id": poesessid,
+    "X-Session-Id": normalizePoeCookieInput(poesessid), // Proxy will convert this to Cookie header
     "X-Requested-With": "XMLHttpRequest",
+    "Accept": "*/*",
+    "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.6,en;q=0.5",
+    "Origin": "https://www.pathofexile.com",
+    "Referer": searchId 
+      ? `https://www.pathofexile.com/trade2/search/${encodeURI(currentLeague)}/${searchId}`
+      : `https://www.pathofexile.com/trade2/search/${encodeURI(currentLeague)}`,
+    "sec-ch-ua": '"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-origin",
   };
 
   if (body !== undefined) {
@@ -89,7 +114,11 @@ async function request<T>(
     throw new TradeApiError(`API error ${res.status} on ${path}`, res.status, errorBody);
   }
 
-  return res.json() as Promise<T>;
+  const data = await res.json();
+  if (path.includes("/fetch/")) {
+    console.log(`[DEBUG API] RAW FETCH RESPONSE:`, data);
+  }
+  return data as T;
 }
 
 export async function searchItems(
@@ -97,30 +126,40 @@ export async function searchItems(
   body: TradeSearchBody,
   poesessid: string
 ): Promise<SearchResponse> {
-  const clean = league.replace(/^poe2\//, "");
+  const l = ensurePoe2(league);
+  // We need to encode the space in 'Runes of Aldur' but keep the '/' in 'poe2/'
+  const encodedLeague = l.split('/').map(part => encodeURIComponent(part)).join('/');
+  
   return request<SearchResponse>(
     "POST",
-    `/api/trade2/search/${encodeURIComponent(clean)}`,
+    `/api/trade2/search/${encodedLeague}`,
     poesessid,
     body,
-    searchLimiter
+    searchLimiter,
+    undefined,
+    l
   );
 }
 
 export async function fetchItems(
   hashes: string[],
   queryId: string,
-  poesessid: string
+  poesessid: string,
+  league: string
 ): Promise<ListingResult[]> {
+  const l = ensurePoe2(league);
+  const encodedLeague = l.split('/').map(part => encodeURIComponent(part)).join('/');
   const results: ListingResult[] = [];
   for (let i = 0; i < hashes.length; i += 10) {
     const batch = hashes.slice(i, i + 10);
     const data = await request<FetchResponse>(
       "GET",
-      `/api/trade2/fetch/${batch.join(",")}?query=${queryId}&realm=poe2`,
+      `/api/trade2/fetch/${batch.join(",")}?query=${queryId}`,
       poesessid,
       undefined,
-      fetchLimiter
+      fetchLimiter,
+      queryId,
+      l
     );
     results.push(...data.result);
     if (i + 10 < hashes.length) await delay(300);
@@ -133,13 +172,17 @@ export async function travelToHideout(whisperToken: string, poesessid: string): 
 }
 
 export async function refreshSearch(searchId: string, league: string, poesessid: string): Promise<SearchResponse> {
-  const clean = league.replace(/^poe2\//, "");
+  const l = ensurePoe2(league);
+  const encodedLeague = l.split('/').map(part => encodeURIComponent(part)).join('/');
+  
   return request<SearchResponse>(
     "GET",
-    `/api/trade2/search/${encodeURIComponent(clean)}/${searchId}`,
+    `/api/trade2/search/${encodedLeague}/${searchId}`,
     poesessid,
     undefined,
-    searchLimiter
+    searchLimiter,
+    searchId,
+    l
   );
 }
 
@@ -164,7 +207,8 @@ export interface ItemCategory {
 }
 
 export function buildTradeUrl(league: string, searchId: string): string {
-  return `https://www.pathofexile.com/trade2/search/poe2/${encodeURIComponent(league)}/${searchId}`;
+  const l = ensurePoe2(league);
+  return `https://www.pathofexile.com/trade2/search/${l}/${searchId}`;
 }
 
 export function delay(ms: number): Promise<void> {

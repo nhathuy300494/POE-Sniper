@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from "react";
 import { fetchStatsList, fetchItemsList, type StatEntry, type ItemCategory } from "../api/tradeClient";
-import type { WatchConfig } from "../types/trade";
 import { useAppState } from "../store/appStore";
 import { searchItems, fetchItems } from "../api/tradeClient";
 import { buildSearchBody, DEFAULT_FORM, type FilterFormState } from "../utils/buildSearchBody";
@@ -51,24 +50,40 @@ const ITEM_CATEGORIES = [
 ];
 
 export function FilterBuilder() {
-  const { state: appState, addWatch } = useAppState();
+  const { state: appState } = useAppState();
   const [form, setForm] = useState<FilterFormState>(DEFAULT_FORM);
   const [statSearch, setStatSearch] = useState("");
   const [statOptions, setStatOptions] = useState<StatEntry[]>([]);
   const [allStats, setAllStats] = useState<StatEntry[]>([]);
+  
+  const [itemNameSearch, setItemNameSearch] = useState("");
+  const [itemNameOptions, setItemNameOptions] = useState<string[]>([]);
+  const [allItems, setAllItems] = useState<{ name: string; type?: string }[]>([]);
+
   const [isSearching, setIsSearching] = useState(false);
   const [searchError, setSearchError] = useState("");
-  const [addWatchError, setAddWatchError] = useState("");
 
   useEffect(() => {
-    let cached: StatEntry[] | null = null;
-    try { const raw = sessionStorage.getItem("poe2:stats"); if (raw) cached = JSON.parse(raw); } catch {}
-    if (cached) {
-      setAllStats(cached);
+    let cachedStats: StatEntry[] | null = null;
+    try { const raw = sessionStorage.getItem("poe2:stats"); if (raw) cachedStats = JSON.parse(raw); } catch {}
+    if (cachedStats) {
+      setAllStats(cachedStats);
     } else {
       fetchStatsList().then(stats => {
         setAllStats(stats);
         try { sessionStorage.setItem("poe2:stats", JSON.stringify(stats)); } catch {}
+      }).catch(console.error);
+    }
+
+    let cachedItems: any[] | null = null;
+    try { const raw = sessionStorage.getItem("poe2:items"); if (raw) cachedItems = JSON.parse(raw); } catch {}
+    if (cachedItems) {
+      setAllItems(cachedItems);
+    } else {
+      fetchItemsList().then(cats => {
+        const flat = cats.flatMap(c => c.entries.map(e => ({ name: e.name, type: e.type })));
+        setAllItems(flat);
+        try { sessionStorage.setItem("poe2:items", JSON.stringify(flat)); } catch {}
       }).catch(console.error);
     }
   }, []);
@@ -76,11 +91,34 @@ export function FilterBuilder() {
   useEffect(() => {
     if (statSearch.length < 2) { setStatOptions([]); return; }
     const q = statSearch.toLowerCase();
-    setStatOptions(allStats.filter(s => s.text.toLowerCase().includes(q)).slice(0, 12));
+    setStatOptions(allStats.filter(s => s.text.toLowerCase().includes(q)).slice(0, 50));
   }, [statSearch, allStats]);
+
+  useEffect(() => {
+    if (itemNameSearch.length < 2) { setItemNameOptions([]); return; }
+    const q = itemNameSearch.toLowerCase();
+    const matches = allItems
+      .filter(i => i.name && i.name.toLowerCase().includes(q))
+      .map(i => i.name)
+      .filter((v, i, a) => v && a.indexOf(v) === i)
+      .slice(0, 10);
+    setItemNameOptions(matches);
+  }, [itemNameSearch, allItems]);
 
   const set = (key: keyof FilterFormState, value: string) =>
     setForm(f => ({ ...f, [key]: value }));
+
+  const handleClear = () => {
+    setForm(DEFAULT_FORM);
+    setItemNameSearch("");
+    setStatSearch("");
+  };
+
+  const selectItemName = (name: string) => {
+    setForm(f => ({ ...f, name }));
+    setItemNameSearch(name);
+    setItemNameOptions([]);
+  };
 
   const addStat = (stat: StatEntry) => {
     if (form.statFilters.find(f => f.id === stat.id)) return;
@@ -104,7 +142,7 @@ export function FilterBuilder() {
       const body = buildSearchBody(form);
       const res = await searchItems(appState.settings.league, body, appState.settings.poesessid);
       const listings = res.result.length > 0
-        ? await fetchItems(res.result.slice(0, 10), res.id, appState.settings.poesessid)
+        ? await fetchItems(res.result.slice(0, 40), res.id, appState.settings.poesessid, appState.settings.league)
         : [];
       window.dispatchEvent(new CustomEvent("poe2:searchResult", {
         detail: { listings, total: res.total, searchId: res.id, searchBody: body },
@@ -114,37 +152,45 @@ export function FilterBuilder() {
     } finally { setIsSearching(false); }
   };
 
-  const handleAddWatch = () => {
-    setAddWatchError("");
-    const label = form.watchLabel.trim() || form.name || form.itemCategory || "Unnamed Watch";
-    const amount = parseFloat(form.thresholdAmount);
-    if (isNaN(amount) || amount <= 0) { setAddWatchError("Enter a valid threshold price."); return; }
-    const config: WatchConfig = {
-      id: `watch-${Date.now()}`, label,
-      league: appState.settings.league,
-      searchBody: buildSearchBody(form),
-      threshold: { amount, currency: form.thresholdCurrency as any },
-      createdAt: Date.now(), status: "active",
-    };
-    const result = addWatch(config);
-    if (!result.ok) setAddWatchError(result.error ?? "Could not add watch.");
-    else setForm(f => ({ ...f, watchLabel: "", thresholdAmount: "" }));
-  };
-
   return (
     <div className="panel" style={{ borderRight: "1px solid var(--border-dim)" }}>
-      <div className="panel-title">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} style={{ width: 14, height: 14 }}>
-          <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
-        </svg>
-        Filter
+      <div className="panel-title" style={{ display: "flex", justifyContent: "space-between" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} style={{ width: 14, height: 14 }}>
+            <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
+          </svg>
+          Filter
+        </div>
+        <button className="btn-link" onClick={handleClear} style={{ fontSize: 10, color: "var(--text-muted)", cursor: "pointer", background: "none", border: "none", textTransform: "uppercase" }}>
+          Clear All
+        </button>
       </div>
 
-      {/* ── Basic ── */}
-      <div className="field-group">
+      <div className="field-group" style={{ position: "relative" }}>
         <label className="field-label">Item Name</label>
         <input className="field-input" placeholder="e.g. Headhunter, Mageblood…"
-          value={form.name} onChange={e => set("name", e.target.value)} />
+          value={itemNameSearch} onChange={e => {
+            setItemNameSearch(e.target.value);
+            set("name", e.target.value);
+          }} autoComplete="off" />
+        {itemNameOptions.length > 0 && (
+          <div style={{
+            position: "absolute", top: "100%", left: 0, right: 0, zIndex: 101,
+            background: "var(--bg-raised)", border: "1px solid var(--border-glow)",
+            borderRadius: "0 0 var(--radius-md) var(--radius-md)",
+            boxShadow: "0 8px 24px rgba(0,0,0,0.5)", maxHeight: 200, overflowY: "auto",
+          }}>
+            {itemNameOptions.map((name, i) => (
+              <div key={i} onClick={() => selectItemName(name)}
+                style={{ padding: "7px 10px", cursor: "pointer", fontSize: 13,
+                  color: "var(--unique)", borderBottom: "1px solid var(--border-dim)" }}
+                onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-hover)")}
+                onMouseLeave={e => (e.currentTarget.style.background = "")}>
+                {name}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
       <div className="field-group">
         <label className="field-label">Base Type</label>
@@ -185,7 +231,6 @@ export function FilterBuilder() {
           <input className="field-input" type="number" value={form.socketsMin} onChange={e => set("socketsMin", e.target.value)} /></div>
       </div>
 
-      {/* ── Weapon ── */}
       <div className="section-sep">Weapon</div>
       <div className="field-row">
         <div className="field-group"><label className="field-label">DPS Min</label>
@@ -206,7 +251,6 @@ export function FilterBuilder() {
           <input className="field-input" type="number" value={form.critMin} onChange={e => set("critMin", e.target.value)} /></div>
       </div>
 
-      {/* ── Armour ── */}
       <div className="section-sep">Armour</div>
       <div className="field-row">
         <div className="field-group"><label className="field-label">Armour Min</label>
@@ -221,7 +265,6 @@ export function FilterBuilder() {
           <input className="field-input" type="number" value={form.spiritMin} onChange={e => set("spiritMin", e.target.value)} /></div>
       </div>
 
-      {/* ── Misc ── */}
       <div className="section-sep">Misc</div>
       <div className="field-row">
         <div className="field-group">
@@ -238,16 +281,7 @@ export function FilterBuilder() {
         </div>
       </div>
 
-      {/* ── Trade ── */}
       <div className="section-sep">Trade</div>
-      <div className="field-group">
-        <label className="field-label">Listing Type</label>
-        <select className="field-select" value={form.saleType} onChange={e => set("saleType", e.target.value as any)}>
-          <option value="any">Any</option>
-          <option value="instant">⚡ Instant Buyout (Merchant Tab)</option>
-          <option value="priced">Priced (Whisper Required)</option>
-        </select>
-      </div>
       <div className="field-row">
         <div className="field-group"><label className="field-label">Price Min</label>
           <input className="field-input" type="number" value={form.priceMin} onChange={e => set("priceMin", e.target.value)} /></div>
@@ -265,7 +299,6 @@ export function FilterBuilder() {
         </select>
       </div>
 
-      {/* ── Stat Filters ── */}
       <div className="section-sep">Modifiers</div>
       <div className="field-group" style={{ position: "relative" }}>
         <label className="field-label">Add Modifier</label>
@@ -303,7 +336,6 @@ export function FilterBuilder() {
         </div>
       ))}
 
-      {/* ── Search ── */}
       {searchError && <div style={{ color: "var(--price-alert)", fontSize: 12, marginBottom: 8 }}>{searchError}</div>}
       <button className="btn btn-primary btn-full" onClick={handleSearch} disabled={isSearching}
         style={{ marginTop: 8, marginBottom: 14 }}>
@@ -315,37 +347,6 @@ export function FilterBuilder() {
         {isSearching ? "Searching…" : "Search"}
       </button>
 
-      {/* ── Watch ── */}
-      <div className="section-sep">Snipe Watch</div>
-      <div className="field-group">
-        <label className="field-label">Watch Label</label>
-        <input className="field-input" placeholder="e.g. Mageblood &lt;70 divine"
-          value={form.watchLabel} onChange={e => set("watchLabel", e.target.value)} />
-      </div>
-      <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-        <div className="field-group" style={{ flex: 1 }}>
-          <label className="field-label">Alert if price ≤</label>
-          <input className="field-input" type="number" min={0} placeholder="70"
-            value={form.thresholdAmount} onChange={e => set("thresholdAmount", e.target.value)} />
-        </div>
-        <div className="field-group" style={{ flex: 1 }}>
-          <label className="field-label">Currency</label>
-          <select className="field-select" value={form.thresholdCurrency} onChange={e => set("thresholdCurrency", e.target.value)}>
-            <option value="divine">Divine</option>
-            <option value="exalted">Exalted</option>
-            <option value="chaos">Chaos</option>
-            <option value="gold">Gold</option>
-          </select>
-        </div>
-      </div>
-      {addWatchError && <div style={{ color: "var(--price-alert)", fontSize: 12, marginBottom: 8 }}>{addWatchError}</div>}
-      <button className="btn btn-watch btn-full" onClick={handleAddWatch}>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-          <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
-          <circle cx="12" cy="12" r="3"/>
-        </svg>
-        Add to Watch List
-      </button>
     </div>
   );
 }

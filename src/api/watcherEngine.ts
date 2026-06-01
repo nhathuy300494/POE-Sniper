@@ -1,134 +1,134 @@
-/**
- * Watcher Engine
- *
- * Manages multiple active "watches" (search + threshold pairs).
- * Enforces rate limit budget across all watches.
- *
- * Budget math:
- *   searchLimiter = 10 req / 60s
- *   Each watch needs 1 search req per poll
- *   At 5s poll interval: 60s / 5s = 12 polls needed → exceeds budget
- *   At 10s poll interval: 60s / 10s = 6 polls → fits 1 watch easily
- *   For N watches at interval I: N * (60/I) <= 10
- *   → maxWatches(5s)  = 1 safe, 2 risky (we allow 2 as default)
- *   → maxWatches(10s) = 3 safe
- *   → maxWatches(20s) = 5 safe
- */
-
-import {
-  searchItems,
-  fetchItems,
-  refreshSearch,
-  buildTradeUrl,
-  delay,
-  TradeApiError,
-  RateLimitError,
-} from "./tradeClient";
+import { searchItems, fetchItems, travelToHideout } from "./tradeClient";
 import type { WatchConfig, ListingResult } from "../types/trade";
 
 export type WatchEvent =
   | { type: "result"; watchId: string; listings: ListingResult[]; cheapest: ListingResult | null }
-  | { type: "threshold_hit"; watchId: string; listing: ListingResult }
+  | { type: "threshold_hit"; watchId: string; listing: ListingResult; mode: "auto" | "report" }
   | { type: "error"; watchId: string; error: string }
   | { type: "rate_limited"; watchId: string; retryAfter: number }
   | { type: "status"; watchId: string; status: WatchConfig["status"] };
 
-type EventHandler = (event: WatchEvent) => void;
+class WatcherEngine {
+  private watches = new Map<string, {
+    config: WatchConfig;
+    timer?: any;
+    searchId?: string;
+    searchExpiry: number;
+    triggeredListingIds: Set<string>;
+    consecutiveErrors: number;
+  }>();
 
-interface ActiveWatch {
-  config: WatchConfig;
-  searchId: string | null;
-  searchExpiry: number;        // epoch ms, re-POST after this
-  knownListingIds: Set<string>; // to detect genuinely new listings
-  timer: ReturnType<typeof setTimeout> | null;
-}
-
-export class WatcherEngine {
-  private watches = new Map<string, ActiveWatch>();
-  private handlers: EventHandler[] = [];
+  private listeners: ((event: WatchEvent) => void)[] = [];
   private poesessid = "";
   private pollIntervalMs = 10_000;
-  private maxWatches = 3;
+  private readonly searchBudgetPerMinute = 10;
 
-  configure(opts: {
-    poesessid: string;
-    pollIntervalMs?: number;
-    maxWatches?: number;
-  }) {
-    this.poesessid = opts.poesessid;
-    if (opts.pollIntervalMs) this.pollIntervalMs = opts.pollIntervalMs;
-    if (opts.maxWatches) this.maxWatches = opts.maxWatches;
+  configure(settings: { poesessid: string; pollIntervalMs: number }) {
+    this.poesessid = settings.poesessid;
+    this.pollIntervalMs = settings.pollIntervalMs;
   }
 
-  on(handler: EventHandler) {
-    this.handlers.push(handler);
-    return () => { this.handlers = this.handlers.filter(h => h !== handler); };
+  on(cb: (event: WatchEvent) => void) {
+    this.listeners.push(cb);
+    return () => { this.listeners = this.listeners.filter(l => l !== cb); };
   }
 
   private emit(event: WatchEvent) {
-    this.handlers.forEach(h => h(event));
+    this.listeners.forEach(l => l(event));
   }
 
-  // ── Add / Remove ──────────────────────────────────────────────────────────
-
-  addWatch(config: WatchConfig): { ok: boolean; error?: string } {
-    if (this.watches.size >= this.maxWatches) {
-      return {
-        ok: false,
-        error: `Maximum ${this.maxWatches} active watches (rate limit). Pause another first.`,
-      };
+  addWatch(config: WatchConfig) {
+    if (this.watches.has(config.id)) return { ok: false, error: "Watch exists" };
+    this.watches.set(config.id, { config, searchExpiry: 0, triggeredListingIds: new Set(), consecutiveErrors: 0 });
+    if (config.status === "active") {
+      const capacity = this.canActivate(config.id);
+      if (!capacity.ok) {
+        this.watches.delete(config.id);
+        return capacity;
+      }
+      this.scheduleNext(config.id, 0);
     }
-    if (this.watches.has(config.id)) {
-      return { ok: false, error: "Watch already exists" };
+    return { ok: true };
+  }
+
+  updateWatch(id: string, patch: Partial<WatchConfig>) {
+    const watch = this.watches.get(id);
+    if (!watch) return { ok: false, error: "Watch not found" };
+    const previousConfig = watch.config;
+    const nextConfig = { ...watch.config, ...patch };
+    watch.config = nextConfig;
+    this.watches.set(id, watch);
+    if (watch.config.status === "active" && (patch.pollIntervalMs || patch.status === "active")) {
+      const capacity = this.canActivate(id);
+      if (!capacity.ok) {
+        watch.config = previousConfig;
+        this.watches.set(id, watch);
+        return capacity;
+      }
     }
-
-    const watch: ActiveWatch = {
-      config: { ...config, status: "active" },
-      searchId: null,
-      searchExpiry: 0,
-      knownListingIds: new Set(),
-      timer: null,
-    };
-
-    this.watches.set(config.id, watch);
-    this.scheduleNext(config.id, 0); // start immediately
+    if (watch.config.status === "active" && patch.pollIntervalMs) {
+      this.scheduleNext(id, watch.config.pollIntervalMs);
+    }
     return { ok: true };
   }
 
   removeWatch(id: string) {
     const watch = this.watches.get(id);
-    if (!watch) return;
-    if (watch.timer) clearTimeout(watch.timer);
+    if (watch?.timer) clearTimeout(watch.timer);
     this.watches.delete(id);
   }
 
   pauseWatch(id: string) {
     const watch = this.watches.get(id);
-    if (!watch) return;
-    if (watch.timer) clearTimeout(watch.timer);
-    watch.timer = null;
-    watch.config.status = "paused";
-    this.emit({ type: "status", watchId: id, status: "paused" });
+    if (watch) {
+      watch.config.status = "paused";
+      if (watch.timer) clearTimeout(watch.timer);
+      this.emit({ type: "status", watchId: id, status: "paused" });
+    }
   }
 
   resumeWatch(id: string) {
     const watch = this.watches.get(id);
-    if (!watch || watch.config.status !== "paused") return;
+    if (!watch) return { ok: false, error: "Watch not found" };
+    if (watch.config.status === "active") return { ok: true };
+    const capacity = this.canActivate(id);
+    if (!capacity.ok) {
+      this.emit({ type: "error", watchId: id, error: capacity.error || "Rate limit budget exceeded" });
+      return capacity;
+    }
     watch.config.status = "active";
     this.emit({ type: "status", watchId: id, status: "active" });
     this.scheduleNext(id, 0);
+    return { ok: true };
   }
 
-  getWatches(): WatchConfig[] {
-    return Array.from(this.watches.values()).map(w => w.config);
+  private canActivate(id: string) {
+    const requested = this.watches.get(id);
+    if (!requested) return { ok: false, error: "Watch not found" };
+
+    const usedBudget = Array.from(this.watches.entries()).reduce((sum, [watchId, watch]) => {
+      if (watchId === id || watch.config.status !== "active") return sum;
+      return sum + 60_000 / (watch.config.pollIntervalMs || this.pollIntervalMs);
+    }, 0);
+    const requestedBudget = 60_000 / (requested.config.pollIntervalMs || this.pollIntervalMs);
+    const total = usedBudget + requestedBudget;
+
+    if (total > this.searchBudgetPerMinute) {
+      return {
+        ok: false,
+        error: `Rate limit budget exceeded. At ${Math.round((requested.config.pollIntervalMs || this.pollIntervalMs) / 1000)}s polling, reduce active watches or use a longer interval.`,
+      };
+    }
+
+    return { ok: true };
   }
 
-  // ── Poll cycle ────────────────────────────────────────────────────────────
-
-  private scheduleNext(id: string, afterMs: number) {
+  private scheduleNext(id: string, ms: number) {
     const watch = this.watches.get(id);
-    if (!watch) return;
-    watch.timer = setTimeout(() => this.poll(id), afterMs);
+    if (watch) {
+      if (watch.timer) clearTimeout(watch.timer);
+      watch.timer = setTimeout(() => this.poll(id), addJitter(ms));
+    }
   }
 
   private async poll(id: string) {
@@ -136,103 +136,79 @@ export class WatcherEngine {
     if (!watch || watch.config.status !== "active") return;
 
     try {
-      // Decide: re-POST (new search_id) or re-use existing search_id
-      const needsReSearch = !watch.searchId || Date.now() > watch.searchExpiry;
+      let searchId = watch.searchId;
+      let hashes: string[] = [];
 
-      let searchId: string;
-      let hashes: string[];
-
-      if (needsReSearch) {
-        const res = await searchItems(
-          watch.config.league,
-          watch.config.searchBody,
-          this.poesessid
-        );
-        searchId = res.id;
-        hashes = res.result.slice(0, 20); // first 20 = cheapest (sorted price asc)
-        watch.searchId = searchId;
-        watch.searchExpiry = Date.now() + 55 * 60 * 1000; // 55min TTL
-      } else {
-        // Re-fetch same search — just get current top results
-        // We don't re-POST, saving a search request
-        const res = await refreshSearch(
-          watch.searchId!,
-          watch.config.league,
-          this.poesessid
-        );
-        searchId = watch.searchId!;
-        hashes = res.result.slice(0, 20);
-      }
+      // Always perform a search to get the freshest results for snipping
+      const res = await searchItems(watch.config.league, watch.config.searchBody, this.poesessid);
+      searchId = res.id;
+      hashes = res.result.slice(0, 10);
+      watch.searchId = searchId;
 
       if (hashes.length === 0) {
         this.emit({ type: "result", watchId: id, listings: [], cheapest: null });
-        this.scheduleNext(id, this.pollIntervalMs);
-        return;
+      this.scheduleNext(id, watch.config.pollIntervalMs || this.pollIntervalMs);
+      return;
       }
 
-      // Fetch top results (up to 10 per request)
-      const listings = await fetchItems(hashes.slice(0, 10), searchId, this.poesessid);
+      const listings = await fetchItems(hashes, searchId, this.poesessid, watch.config.league);
+      const cheapest = listings[0] || null;
+      watch.consecutiveErrors = 0;
 
-      watch.config.lastChecked = Date.now();
-      watch.config.lastResult = listings;
+      this.emit({ type: "result", watchId: id, listings, cheapest });
 
-      this.emit({ type: "result", watchId: id, listings, cheapest: listings[0] ?? null });
-
-      // Check thresholds
-      this.checkThreshold(watch, listings);
-
-      this.scheduleNext(id, this.pollIntervalMs);
-
-    } catch (err) {
-      if (err instanceof RateLimitError) {
-        this.emit({ type: "rate_limited", watchId: id, retryAfter: err.retryAfter });
-        // Back off and retry
-        this.scheduleNext(id, err.retryAfter * 1000 + 1000);
-      } else if (err instanceof TradeApiError) {
-        this.emit({ type: "error", watchId: id, error: `API ${err.status}: ${err.message}` });
-        this.scheduleNext(id, this.pollIntervalMs * 2); // exponential backoff light
-      } else {
-        this.emit({ type: "error", watchId: id, error: String(err) });
-        this.scheduleNext(id, this.pollIntervalMs);
-      }
-    }
-  }
-
-  // ── Threshold check ───────────────────────────────────────────────────────
-
-  private checkThreshold(watch: ActiveWatch, listings: ListingResult[]) {
-    const { threshold } = watch.config;
-
-    for (const listing of listings) {
-      const price = listing.listing.price;
-
-      // Only compare same currency
-      if (price.currency !== threshold.currency) continue;
-      if (price.amount > threshold.amount) continue;
-
-      // Only fire once per listing id (don't spam same item)
-      if (watch.knownListingIds.has(listing.id)) continue;
-
-      watch.knownListingIds.add(listing.id);
-      watch.config.status = "triggered";
-
-      this.emit({ type: "threshold_hit", watchId: watch.config.id, listing });
-    }
-
-    // Clean up known IDs if set grows too large (> 500 = some listings delisted)
-    if (watch.knownListingIds.size > 500) {
-      const currentIds = new Set(listings.map(l => l.id));
-      watch.knownListingIds = new Set(
-        [...watch.knownListingIds].filter(id => currentIds.has(id))
+      const thresholdHit = listings.find(listing =>
+        listing.listing.price.currency === watch.config.threshold.currency &&
+        listing.listing.price.amount <= watch.config.threshold.amount &&
+        !watch.triggeredListingIds.has(listing.id)
       );
-    }
-  }
 
-  stopAll() {
-    for (const [id] of this.watches) {
-      this.pauseWatch(id);
+      if (thresholdHit) {
+        watch.triggeredListingIds.add(thresholdHit.id);
+        const token = thresholdHit.listing.whisper_token || thresholdHit.listing.hideout_token;
+        
+        if (watch.config.mode === "auto" && token) {
+          console.log(`[Watcher] Threshold hit! AUTO TRAVEL for ${id}`);
+          try {
+            await travelToHideout(token, this.poesessid);
+            this.emit({ type: "threshold_hit", watchId: id, listing: thresholdHit, mode: "auto" });
+          } catch (err) {
+            this.emit({ type: "error", watchId: id, error: "Auto-travel failed: Login required" });
+          }
+        } else {
+          console.log(`[Watcher] Threshold hit! REPORT for ${id}`);
+          this.emit({ type: "threshold_hit", watchId: id, listing: thresholdHit, mode: "report" });
+        }
+      }
+
+      this.scheduleNext(id, watch.config.pollIntervalMs || this.pollIntervalMs);
+    } catch (err: any) {
+      console.error(`[Watcher] Error polling ${id}:`, err);
+      if (err.status === 429) {
+        this.emit({ type: "rate_limited", watchId: id, retryAfter: err.retryAfter || 60 });
+        this.scheduleNext(id, (err.retryAfter || 60) * 1000);
+      } else if (err.status === 502 || err.status === 403 || err.status === 503) {
+        watch.consecutiveErrors += 1;
+        const cooldown = Math.min(15 * 60_000, 60_000 * Math.pow(2, watch.consecutiveErrors - 1));
+        this.emit({
+          type: "error",
+          watchId: id,
+          error: `${err.message}. Cooling down for ${Math.round(cooldown / 1000)}s to avoid bot/rate-limit escalation.`,
+        });
+        this.scheduleNext(id, cooldown);
+      } else {
+        watch.consecutiveErrors += 1;
+        this.emit({ type: "error", watchId: id, error: err.message });
+        this.scheduleNext(id, (watch.config.pollIntervalMs || this.pollIntervalMs) * 2);
+      }
     }
   }
+}
+
+function addJitter(ms: number) {
+  if (ms <= 0) return Math.floor(500 + Math.random() * 1500);
+  const jitter = 0.15 + Math.random() * 0.2;
+  return Math.floor(ms * (1 + jitter));
 }
 
 export const watcherEngine = new WatcherEngine();

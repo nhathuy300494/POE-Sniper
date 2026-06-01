@@ -158,11 +158,38 @@ html, body, #root {
   overflow: hidden;
 }
 
+.tab-panel {
+  display: none;
+  height: 100%;
+  overflow: hidden;
+}
+
+.tab-panel:not(.active) {
+  display: none !important;
+}
+
+.tab-panel.active {
+  display: block;
+  overflow-y: auto;
+}
+
+.tab-panel.search-layout.active {
+  display: grid;
+  overflow: hidden;
+}
+
 .search-layout {
   display: grid;
   grid-template-columns: 340px 1fr;
   height: 100%;
   overflow: hidden;
+}
+
+.watches-container,
+.alerts-container,
+.settings-container {
+  min-height: 100%;
+  padding-bottom: 24px;
 }
 
 /* ─── Panel base ───────────────────────────────────────────────────────────── */
@@ -203,6 +230,18 @@ html, body, #root {
   margin-bottom: 5px;
 }
 
+.field-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+
+.field-label-row .field-label {
+  margin-bottom: 0;
+}
+
 .field-input, .field-select {
   width: 100%;
   padding: 7px 10px;
@@ -223,6 +262,21 @@ html, body, #root {
 }
 
 .field-input::placeholder { color: var(--text-dim); }
+
+.secret-mask {
+  min-height: 86px;
+  display: flex;
+  align-items: center;
+  font-family: monospace;
+  letter-spacing: 0.12em;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.btn-sm {
+  padding: 5px 9px;
+  font-size: 10px;
+}
 
 .field-row {
   display: grid;
@@ -451,6 +505,39 @@ html, body, #root {
   margin-bottom: 4px;
 }
 
+.item-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 4px 12px;
+  margin: 6px 0 8px;
+  padding: 8px 10px;
+  background: rgba(0,0,0,0.16);
+  border: 1px solid var(--border-dim);
+  border-radius: var(--radius-sm);
+}
+
+.item-metric {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.35;
+  min-width: 0;
+}
+
+.item-metric span,
+.item-metric strong {
+  min-width: 0;
+}
+
+.item-metric strong {
+  color: var(--text-primary);
+  font-weight: 600;
+  text-align: right;
+  white-space: nowrap;
+}
+
 .item-mods {
   font-size: 12px;
   color: var(--magic);
@@ -465,24 +552,50 @@ html, body, #root {
 .price-tag {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   font-family: 'Cinzel', serif;
   font-size: 14px;
   font-weight: 700;
   white-space: nowrap;
+  margin-bottom: 8px;
 }
 
-.price-tag.divine { color: var(--divine); }
-.price-tag.chaos  { color: var(--chaos); }
-.price-tag .currency-icon {
-  width: 18px;
-  height: 18px;
-  object-fit: contain;
+.currency-name {
+  font-size: 10px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  letter-spacing: 0.05em;
 }
 
 .price-below-threshold { color: var(--price-good) !important; }
 
+.item-mods {
+  margin: 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mods-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.mods-group.implicit {
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border-dim);
+}
+
+.mod-line {
+  font-size: 12px;
+  color: var(--magic);
+  line-height: 1.3;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.8);
+}
+
 .seller-name {
+  margin-top: 8px;
   font-size: 11px;
   color: var(--text-muted);
   font-style: italic;
@@ -493,22 +606,54 @@ html, body, #root {
   color: var(--text-dim);
 }
 
-/* ─── Watch cards ──────────────────────────────────────────────────────────── */
-.watch-card {
+.watch-dashboard-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.watch-dashboard {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.9fr) minmax(340px, 1.15fr) minmax(280px, 0.95fr);
+  gap: 12px;
   background: var(--bg-surface);
   border: 1px solid var(--border-dim);
   border-radius: var(--radius-md);
-  padding: 14px;
-  margin-bottom: 10px;
+  padding: 12px;
   box-shadow: var(--shadow-card);
 }
 
-.watch-card.status-triggered {
+.watch-dashboard.status-triggered {
   border-color: var(--price-alert);
   box-shadow: var(--shadow-alert);
 }
 
-.watch-card.status-paused { opacity: 0.6; }
+.watch-dashboard.status-paused .watch-snipe {
+  opacity: 0.74;
+}
+
+.watch-column {
+  min-width: 0;
+  padding: 10px;
+  background: var(--bg-dark);
+  border: 1px solid var(--border-dim);
+  border-radius: var(--radius-sm);
+}
+
+.watch-column-title {
+  font-family: 'Cinzel', serif;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--gold);
+  margin-bottom: 10px;
+}
+
+.watch-rate-note {
+  margin: -6px 0 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
 
 .watch-header {
   display: flex;
@@ -565,6 +710,54 @@ html, body, #root {
   color: var(--gold);
 }
 
+.watch-controls {
+  display: grid;
+  grid-template-columns: minmax(90px, 1fr) minmax(95px, 1fr) minmax(90px, 1fr) minmax(90px, 1fr);
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.watch-controls.compact {
+  grid-template-columns: 1fr 1fr;
+}
+
+.watch-control {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.watch-control span {
+  font-family: 'Cinzel', serif;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+.watch-control input,
+.watch-control select {
+  width: 100%;
+  padding: 6px 8px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-dim);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: 'Crimson Pro', serif;
+  font-size: 13px;
+  outline: none;
+}
+
+.watch-live {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-dim);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
 .watch-cheapest {
   display: flex;
   align-items: center;
@@ -580,6 +773,97 @@ html, body, #root {
   display: flex;
   gap: 6px;
   margin-top: 10px;
+}
+
+.watch-empty {
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 10px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-dim);
+  border-radius: var(--radius-sm);
+}
+
+.found-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.found-item {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  gap: 9px;
+  align-items: center;
+  padding: 8px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-dim);
+  border-left: 3px solid var(--price-good);
+  border-radius: var(--radius-sm);
+}
+
+.found-icon {
+  width: 42px;
+  height: 42px;
+  object-fit: contain;
+}
+
+.found-name {
+  font-family: 'Cinzel', serif;
+  font-size: 12px;
+  color: var(--unique);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.found-price {
+  color: var(--price-good);
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.found-seller {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.found-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 4px 8px;
+  margin: 4px 0;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.price-chart {
+  width: 100%;
+  height: 96px;
+  color: var(--gold-bright);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-dim);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+  margin-bottom: 10px;
+}
+
+.price-stats {
+  display: grid;
+  gap: 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.price-up { color: var(--price-alert); }
+.price-down { color: var(--price-good); }
+
+@media (max-width: 1100px) {
+  .watch-dashboard {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* ─── Alert panel ──────────────────────────────────────────────────────────── */
@@ -617,6 +901,40 @@ html, body, #root {
 }
 
 .alert-detail { font-size: 12px; color: var(--text-muted); }
+
+.alert-toast {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 500;
+  width: min(360px, calc(100vw - 36px));
+  padding: 14px;
+  background: var(--bg-raised);
+  border: 1px solid var(--price-alert);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-alert);
+}
+
+.alert-toast-title {
+  font-family: 'Cinzel', serif;
+  font-size: 12px;
+  color: var(--price-alert);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 4px;
+}
+
+.alert-toast-body {
+  font-size: 14px;
+  color: var(--text-primary);
+  margin-bottom: 10px;
+}
+
+.alert-toast-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
 
 /* ─── Settings ─────────────────────────────────────────────────────────────── */
 .settings-page {
