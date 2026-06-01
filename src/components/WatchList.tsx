@@ -5,6 +5,13 @@ import type { ListingResult } from "../types/trade";
 import { getItemMetrics } from "../utils/itemDisplay";
 
 const POLL_OPTIONS = [5_000, 10_000, 20_000, 30_000, 60_000];
+const STRATEGIES = [
+  { value: "mixed", label: "Mixed" },
+  { value: "unique-liquid", label: "Unique Liquid" },
+  { value: "rare-weapon", label: "Rare Weapon" },
+  { value: "defensive-gear", label: "Defensive Gear" },
+  { value: "currency-bulk", label: "Currency/Bulk" },
+] as const;
 
 export function WatchList() {
   const { state, pauseWatch, resumeWatch, removeWatch, updateWatch } = useAppState();
@@ -108,6 +115,27 @@ export function WatchList() {
                       <option value="report">Report</option>
                       <option value="auto">Auto</option>
                     </select>
+                  </label>
+                  <label className="watch-control">
+                    <span>Strategy</span>
+                    <select
+                      value={w.strategy || "mixed"}
+                      onChange={e => updateWatch(w.id, { strategy: e.target.value as typeof STRATEGIES[number]["value"] })}
+                    >
+                      {STRATEGIES.map(strategy => (
+                        <option key={strategy.value} value={strategy.value}>{strategy.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="watch-control">
+                    <span>Min Profit</span>
+                    <input
+                      type="number"
+                      min={0}
+                      step={0.25}
+                      value={w.minProfitDivine ?? 1}
+                      onChange={e => updateWatch(w.id, { minProfitDivine: Number(e.target.value) || 0 })}
+                    />
                   </label>
                 </div>
 

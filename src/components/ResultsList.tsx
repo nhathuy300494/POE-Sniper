@@ -3,6 +3,7 @@ import { useAppState } from "../store/appStore";
 import type { ListingResult, TradeSearchBody } from "../types/trade";
 import { travelToHideout } from "../api/tradeClient";
 import { cleanModText, getItemMetrics } from "../utils/itemDisplay";
+import { inferStrategy } from "../utils/pricingEngine";
 
 export function ResultsList() {
   const { state, addWatch } = useAppState();
@@ -53,6 +54,8 @@ export function ResultsList() {
       searchBody: results.searchBody,
       threshold: { amount, currency },
       mode: "report",
+      strategy: inferStrategy(firstListing),
+      minProfitDivine: 1,
       pollIntervalMs: state.settings.pollIntervalMs,
       createdAt: Date.now(),
       status: "paused",

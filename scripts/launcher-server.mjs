@@ -60,6 +60,11 @@ function startServer(port) {
       return;
     }
 
+    if (req.url.startsWith("/poeninja")) {
+      proxyPoeNinjaRequest(req, res);
+      return;
+    }
+
     serveStatic(req, res);
   });
 
@@ -142,6 +147,36 @@ function proxyTradeRequest(clientReq, clientRes) {
   upstreamReq.on("error", (error) => {
     console.error("[launcher] Proxy error:", error.message);
     sendJson(clientRes, 502, { error: "Path of Exile trade proxy request failed" });
+  });
+
+  clientReq.pipe(upstreamReq);
+}
+
+function proxyPoeNinjaRequest(clientReq, clientRes) {
+  const path = clientReq.url.replace(/^\/poeninja/, "") || "/";
+  const headers = {
+    accept: clientReq.headers.accept || "application/json",
+    "user-agent": clientReq.headers["user-agent"] || "POE2 Sniper Launcher",
+    host: "poe.ninja",
+  };
+
+  const upstreamReq = httpsRequest(
+    {
+      protocol: "https:",
+      hostname: "poe.ninja",
+      method: clientReq.method,
+      path,
+      headers,
+    },
+    (upstreamRes) => {
+      clientRes.writeHead(upstreamRes.statusCode || 502, upstreamRes.headers);
+      upstreamRes.pipe(clientRes);
+    },
+  );
+
+  upstreamReq.on("error", (error) => {
+    console.error("[launcher] poe.ninja proxy error:", error.message);
+    sendJson(clientRes, 502, { error: "poe.ninja proxy request failed" });
   });
 
   clientReq.pipe(upstreamReq);

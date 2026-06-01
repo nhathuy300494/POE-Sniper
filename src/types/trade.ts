@@ -43,6 +43,90 @@ export interface TradeFilters {
   misc_filters?: { filters: { corrupted?: { option: boolean }; ilvl?: MinMax } };
 }
 
+// ─── Market / automation types ───────────────────────────────────────────────
+
+export type StrategyType =
+  | "unique-liquid"
+  | "rare-weapon"
+  | "defensive-gear"
+  | "currency-bulk"
+  | "mixed";
+
+export type ConfidenceLabel = "High" | "Medium" | "Low";
+
+export interface MarketPrice {
+  id: string;
+  name: string;
+  type: string;
+  category?: string;
+  detailsId?: string;
+  icon?: string;
+  primaryValue?: number;
+  divineValue?: number;
+  chaosValue?: number;
+  exaltedValue?: number;
+  volumePerHour?: number;
+  listingCount?: number;
+  trend7d?: number;
+  updatedAt: number;
+  source: "poe.ninja";
+}
+
+export interface MarketSnapshot {
+  league: string;
+  fetchedAt: number;
+  prices: MarketPrice[];
+  rates: Record<string, number>;
+  error?: string;
+}
+
+export interface DealScore {
+  estimatedResaleFloor: number;
+  quickSellPrice: number;
+  grossMargin: number;
+  marginAfterUndercut: number;
+  confidence: ConfidenceLabel;
+  liquidity: ConfidenceLabel;
+  buyPriceDivine: number;
+  source: "live-floor" | "poe.ninja" | "hybrid" | "insufficient-data";
+  reason: string;
+}
+
+export interface Opportunity {
+  id: string;
+  watchId: string;
+  listingId: string;
+  fingerprint: string;
+  itemName: string;
+  baseType: string;
+  icon: string;
+  seller: string;
+  listing: ListingResult;
+  strategy: StrategyType;
+  score: DealScore;
+  status: "open" | "bought" | "skipped" | "sold" | "failed";
+  firstSeenAt: number;
+  lastSeenAt: number;
+  seenCount: number;
+  suggestedListPrice: number;
+  actualSellPrice?: number;
+  closedAt?: number;
+}
+
+export interface TradeLedgerEntry {
+  id: string;
+  opportunityId: string;
+  itemName: string;
+  strategy: StrategyType;
+  buyPriceDivine: number;
+  suggestedListPrice: number;
+  actualSellPrice?: number;
+  status: "bought" | "sold" | "failed";
+  boughtAt: number;
+  closedAt?: number;
+  profitDivine?: number;
+}
+
 export interface StatGroup {
   type: "and" | "or" | "count" | "weight" | "not";
   filters: StatFilter[];
@@ -138,6 +222,8 @@ export interface WatchConfig {
     currency: string;
   };
   mode: "auto" | "report";
+  strategy?: StrategyType;
+  minProfitDivine?: number;
   pollIntervalMs: number;
   createdAt: number;
   lastChecked?: number;

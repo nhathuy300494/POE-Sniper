@@ -27,7 +27,12 @@ export default defineConfig({
             }
           });
         }
-      }
+      },
+      '/poeninja': {
+        target: 'https://poe.ninja',
+        changeOrigin: true,
+        rewrite: path => path.replace(/^\/poeninja/, ''),
+      },
     }
   }
 })

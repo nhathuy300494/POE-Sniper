@@ -3,9 +3,24 @@
  * Keeps settings, watch list, and live results.
  */
 
-import React, { createContext, useContext, useReducer, useEffect } from "react";
-import type { WatchConfig, AppSettings, ListingResult } from "../types/trade";
+import React, { createContext, useContext, useReducer, useEffect, useRef } from "react";
+import type {
+  AppSettings,
+  ListingResult,
+  MarketSnapshot,
+  Opportunity,
+  TradeLedgerEntry,
+  WatchConfig,
+} from "../types/trade";
 import { watcherEngine, WatchEvent } from "../api/watcherEngine";
+import { fetchMarketSnapshot } from "../api/marketDataClient";
+import { travelToHideout } from "../api/tradeClient";
+import {
+  canAutoTravel,
+  listingFingerprint,
+  scoreListing,
+  shouldCreateOpportunity,
+} from "../utils/pricingEngine";
 
 // ─── State shape ──────────────────────────────────────────────────────────────
 
@@ -30,6 +45,10 @@ export interface AppState {
   watches: WatchConfig[];
   liveResults: Record<string, LiveResult>;
   alerts: Alert[];
+  marketSnapshot: MarketSnapshot | null;
+  marketLoading: boolean;
+  opportunities: Opportunity[];
+  tradeLedger: TradeLedgerEntry[];
 }
 
 export interface Alert {
@@ -59,7 +78,13 @@ type Action =
   | { type: "SET_LIVE_RESULT"; payload: LiveResult }
   | { type: "ADD_ALERT"; payload: Alert }
   | { type: "DISMISS_ALERT"; payload: string }
-  | { type: "CLEAR_ALERTS" };
+  | { type: "CLEAR_ALERTS" }
+  | { type: "SET_MARKET_LOADING"; payload: boolean }
+  | { type: "SET_MARKET_SNAPSHOT"; payload: MarketSnapshot }
+  | { type: "UPSERT_OPPORTUNITIES"; payload: Opportunity[] }
+  | { type: "CLEAR_OPPORTUNITIES" }
+  | { type: "MARK_OPPORTUNITY"; payload: { id: string; status: Opportunity["status"]; actualSellPrice?: number } }
+  | { type: "ADD_OR_UPDATE_LEDGER"; payload: TradeLedgerEntry };
 
 function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -123,6 +148,64 @@ function reducer(state: AppState, action: Action): AppState {
     case "CLEAR_ALERTS":
       return { ...state, alerts: [] };
 
+    case "SET_MARKET_LOADING":
+      return { ...state, marketLoading: action.payload };
+
+    case "SET_MARKET_SNAPSHOT":
+      return { ...state, marketSnapshot: action.payload, marketLoading: false };
+
+    case "UPSERT_OPPORTUNITIES": {
+      const merged = new Map(state.opportunities.map(op => [op.fingerprint, op]));
+      for (const incoming of action.payload) {
+        const previous = merged.get(incoming.fingerprint);
+        merged.set(incoming.fingerprint, previous
+          ? {
+              ...previous,
+              ...incoming,
+              id: previous.id,
+              status: previous.status === "open" ? incoming.status : previous.status,
+              firstSeenAt: previous.firstSeenAt,
+              seenCount: previous.seenCount + 1,
+            }
+          : incoming
+        );
+      }
+      return {
+        ...state,
+        opportunities: Array.from(merged.values())
+          .sort((a, b) => b.score.marginAfterUndercut - a.score.marginAfterUndercut)
+          .slice(0, 150),
+      };
+    }
+
+    case "CLEAR_OPPORTUNITIES":
+      return { ...state, opportunities: [] };
+
+    case "MARK_OPPORTUNITY":
+      return {
+        ...state,
+        opportunities: state.opportunities.map(op =>
+          op.id === action.payload.id
+            ? {
+                ...op,
+                status: action.payload.status,
+                actualSellPrice: action.payload.actualSellPrice ?? op.actualSellPrice,
+                closedAt: ["sold", "failed", "skipped"].includes(action.payload.status) ? Date.now() : op.closedAt,
+              }
+            : op
+        ),
+      };
+
+    case "ADD_OR_UPDATE_LEDGER": {
+      const exists = state.tradeLedger.some(entry => entry.id === action.payload.id);
+      return {
+        ...state,
+        tradeLedger: exists
+          ? state.tradeLedger.map(entry => entry.id === action.payload.id ? action.payload : entry)
+          : [action.payload, ...state.tradeLedger].slice(0, 250),
+      };
+    }
+
     default:
       return state;
   }
@@ -139,6 +222,9 @@ interface AppContextValue {
   resumeWatch: (id: string) => { ok: boolean; error?: string };
   updateWatch: (id: string, patch: Partial<WatchConfig>) => { ok: boolean; error?: string };
   saveSettings: (s: Partial<AppSettings>) => void;
+  refreshMarket: (force?: boolean) => Promise<MarketSnapshot | null>;
+  markOpportunity: (id: string, status: Opportunity["status"], actualSellPrice?: number) => void;
+  clearOpportunities: () => void;
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
@@ -149,7 +235,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     watches: loadWatches(),
     liveResults: loadLiveResults(),
     alerts: [],
+    marketSnapshot: loadMarketSnapshot(),
+    marketLoading: false,
+    opportunities: loadOpportunities(),
+    tradeLedger: loadTradeLedger(),
   });
+  const stateRef = useRef(state);
+
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
 
   useEffect(() => {
     state.watches.forEach(watch => {
@@ -162,6 +257,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const unsub = watcherEngine.on((event: WatchEvent) => {
       switch (event.type) {
         case "result":
+          queueOpportunities(event.watchId, event.listings);
           dispatch({
             type: "SET_LIVE_RESULT",
             payload: {
@@ -226,6 +322,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     return unsub;
   }, []);
 
+  useEffect(() => {
+    void refreshMarket();
+  }, []);
+
   // Re-configure engine when settings change
   useEffect(() => {
     watcherEngine.configure({
@@ -241,6 +341,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     persistLiveResults(state.liveResults);
   }, [state.liveResults]);
+
+  useEffect(() => {
+    persistOpportunities(state.opportunities);
+  }, [state.opportunities]);
+
+  useEffect(() => {
+    persistTradeLedger(state.tradeLedger);
+  }, [state.tradeLedger]);
 
   const addWatch = (config: WatchConfig) => {
     const result = watcherEngine.addWatch(config);
@@ -281,8 +389,165 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     persistSettings({ ...state.settings, ...partial });
   };
 
+  const refreshMarket = async (force = false) => {
+    dispatch({ type: "SET_MARKET_LOADING", payload: true });
+    try {
+      const snapshot = await fetchMarketSnapshot(stateRef.current.settings.league, force);
+      dispatch({ type: "SET_MARKET_SNAPSHOT", payload: snapshot });
+      return snapshot;
+    } catch (err: any) {
+      const failedSnapshot: MarketSnapshot = {
+        league: stateRef.current.settings.league,
+        fetchedAt: Date.now(),
+        prices: [],
+        rates: {},
+        error: err?.message || "Failed to refresh market data.",
+      };
+      dispatch({ type: "SET_MARKET_SNAPSHOT", payload: failedSnapshot });
+      return failedSnapshot;
+    }
+  };
+
+  const markOpportunity = (id: string, status: Opportunity["status"], actualSellPrice?: number) => {
+    const opportunity = stateRef.current.opportunities.find(op => op.id === id);
+    if (!opportunity) return;
+    dispatch({ type: "MARK_OPPORTUNITY", payload: { id, status, actualSellPrice } });
+
+    if (status === "bought") {
+      dispatch({
+        type: "ADD_OR_UPDATE_LEDGER",
+        payload: {
+          id: `ledger-${id}`,
+          opportunityId: id,
+          itemName: opportunity.itemName,
+          strategy: opportunity.strategy,
+          buyPriceDivine: opportunity.score.buyPriceDivine,
+          suggestedListPrice: opportunity.suggestedListPrice,
+          status: "bought",
+          boughtAt: Date.now(),
+        },
+      });
+    }
+
+    if (status === "sold" || status === "failed") {
+      const existing = stateRef.current.tradeLedger.find(entry => entry.opportunityId === id);
+      if (existing) {
+        const sellPrice = actualSellPrice ?? existing.actualSellPrice;
+        dispatch({
+          type: "ADD_OR_UPDATE_LEDGER",
+          payload: {
+            ...existing,
+            status,
+            actualSellPrice: sellPrice,
+            closedAt: Date.now(),
+            profitDivine: status === "sold" && sellPrice !== undefined
+              ? sellPrice - existing.buyPriceDivine
+              : existing.profitDivine,
+          },
+        });
+      }
+    }
+  };
+
+  const clearOpportunities = () => {
+    dispatch({ type: "CLEAR_OPPORTUNITIES" });
+  };
+
+  const queueOpportunities = (watchId: string, listings: ListingResult[]) => {
+    const snapshot = stateRef.current;
+    const watch = snapshot.watches.find(w => w.id === watchId);
+    if (!watch) return;
+    const opportunities = listings
+      .map(listing => {
+        const score = scoreListing(listing, watch, listings, snapshot.marketSnapshot);
+        if (!shouldCreateOpportunity(score, watch)) return null;
+        const fingerprint = listingFingerprint(listing);
+        const opportunity: Opportunity = {
+          id: `opp-${listing.id}`,
+          watchId,
+          listingId: listing.id,
+          fingerprint,
+          itemName: listing.item.name || listing.item.typeLine,
+          baseType: listing.item.baseType || listing.item.typeLine,
+          icon: listing.item.icon,
+          seller: listing.listing.account.lastCharacterName || listing.listing.account.name,
+          listing,
+          strategy: watch.strategy || "mixed",
+          score,
+          status: "open" as const,
+          firstSeenAt: Date.now(),
+          lastSeenAt: Date.now(),
+          seenCount: 1,
+          suggestedListPrice: score.quickSellPrice,
+        };
+        return opportunity;
+      })
+      .filter((op): op is Opportunity => op !== null);
+
+    if (opportunities.length) {
+      dispatch({ type: "UPSERT_OPPORTUNITIES", payload: opportunities });
+      handleOpportunityActions(watch, opportunities);
+    }
+  };
+
+  const handleOpportunityActions = (watch: WatchConfig, opportunities: Opportunity[]) => {
+    const existingFingerprints = new Set(stateRef.current.opportunities.map(op => op.fingerprint));
+    for (const opportunity of opportunities) {
+      if (existingFingerprints.has(opportunity.fingerprint)) continue;
+      const token = opportunity.listing.listing.whisper_token || opportunity.listing.listing.hideout_token;
+
+      if (canAutoTravel(opportunity.score, watch) && token && stateRef.current.settings.poesessid) {
+        void travelToHideout(token, stateRef.current.settings.poesessid).catch(() => {
+          dispatch({
+            type: "SET_LIVE_RESULT",
+            payload: {
+              watchId: watch.id,
+              listings: [],
+              cheapest: null,
+              updatedAt: Date.now(),
+              error: "Auto-travel opportunity failed: Login required",
+            },
+          });
+        });
+        dispatch({
+          type: "ADD_ALERT",
+          payload: {
+            id: `${watch.id}-${opportunity.listing.id}-deal-${Date.now()}`,
+            watchId: watch.id,
+            listing: opportunity.listing,
+            seenAt: Date.now(),
+            dismissed: false,
+          },
+        });
+      } else if (watch.mode === "report") {
+        dispatch({
+          type: "ADD_ALERT",
+          payload: {
+            id: `${watch.id}-${opportunity.listing.id}-deal-${Date.now()}`,
+            watchId: watch.id,
+            listing: opportunity.listing,
+            seenAt: Date.now(),
+            dismissed: false,
+          },
+        });
+      }
+    }
+  };
+
   return (
-    <AppContext.Provider value={{ state, dispatch, addWatch, removeWatch, pauseWatch, resumeWatch, updateWatch, saveSettings }}>
+    <AppContext.Provider value={{
+      state,
+      dispatch,
+      addWatch,
+      removeWatch,
+      pauseWatch,
+      resumeWatch,
+      updateWatch,
+      saveSettings,
+      refreshMarket,
+      markOpportunity,
+      clearOpportunities,
+    }}>
       {children}
     </AppContext.Provider>
   );
@@ -318,10 +583,51 @@ function loadWatches(): WatchConfig[] {
       ...watch,
       status: watch.status === "active" ? "paused" : watch.status,
       pollIntervalMs: watch.pollIntervalMs || 10_000,
+      strategy: watch.strategy || "mixed",
+      minProfitDivine: watch.minProfitDivine ?? 1,
     }));
   } catch {
     return [];
   }
+}
+
+function loadMarketSnapshot(): MarketSnapshot | null {
+  try {
+    const raw = localStorage.getItem("poe2sniper:marketSnapshots:Runes of Aldur");
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function loadOpportunities(): Opportunity[] {
+  try {
+    const raw = localStorage.getItem("poe2sniper:opportunities");
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function persistOpportunities(opportunities: Opportunity[]) {
+  try {
+    localStorage.setItem("poe2sniper:opportunities", JSON.stringify(opportunities));
+  } catch { /* ignore */ }
+}
+
+function loadTradeLedger(): TradeLedgerEntry[] {
+  try {
+    const raw = localStorage.getItem("poe2sniper:tradeLedger");
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function persistTradeLedger(entries: TradeLedgerEntry[]) {
+  try {
+    localStorage.setItem("poe2sniper:tradeLedger", JSON.stringify(entries));
+  } catch { /* ignore */ }
 }
 
 function persistWatches(watches: WatchConfig[]) {
