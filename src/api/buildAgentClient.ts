@@ -9,6 +9,11 @@ export interface BuildAgentStatus {
   geminiMcp: { ok: boolean; serverName: string; detail: string };
   pob: { ok: boolean; path: string; detail: string };
   pobBridge: { ok: boolean; detail: string };
+  mcpCapabilities: {
+    tools: { ok: boolean; detail: string; names: string[] };
+    pobBridgeTools: { ok: boolean; detail: string; names: string[] };
+    exporter: { ok: boolean; detail: string };
+  };
 }
 
 export interface BuildAgentRequest {
@@ -37,12 +42,33 @@ export interface BuildAgentResult {
   generatedAt: string;
   provider: string;
   mcpToolsUsed: string[];
+  deterministicContext: {
+    version: string;
+    generatedAt: string;
+    tags: string[];
+    formulaIds: string[];
+    archetypes: Array<{
+      id: string;
+      label: string;
+      class?: string;
+      ascendancy?: string;
+      primarySkills?: string[];
+      utilitySkills?: string[];
+      mechanicGraph?: string[];
+      damageFormula?: string[];
+      defenseFormula?: string[];
+      gearDirection?: string[];
+      failureModes?: string[];
+    }>;
+  };
+  deterministicContextUsed: string[];
   pobCodeSource: string;
   pobbUploadStatus: string;
   pobOpenStatus: string;
   assumptions: string[];
   pobLink: string;
   pobCode: string;
+  pobSemanticValidation: { ok: boolean; detail: string; xmlExcerpt?: string };
   build: {
     name: string;
     class: string;
@@ -54,8 +80,18 @@ export interface BuildAgentResult {
     skillLinks: string[];
     passivePlan: string[];
   } | null;
+  damageModels: Array<{
+    label: string;
+    type: string;
+    mainSkill: string;
+    setupSequence: string[];
+    formula: string[];
+    conditions: string[];
+    estimatedOutput: Record<string, string>;
+    confidence: string;
+  }>;
   validation: {
-    status: "validated" | "estimated" | "failed";
+    status: "validated" | "estimated" | "blocked" | "failed";
     metrics?: Record<string, string>;
     reason: string;
   };

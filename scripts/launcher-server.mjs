@@ -2,10 +2,11 @@ import { createServer } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { Socket } from "node:net";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, createReadStream, statSync, readdirSync } from "node:fs";
+import { existsSync, createReadStream, statSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { inflateRawSync, inflateSync } from "node:zlib";
 
 const rootDir = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const distDir = join(rootDir, "dist");
@@ -170,7 +171,11 @@ async function handleBuildAgentOpenPob(clientReq, clientRes) {
 
   try {
     const payload = await readJsonBody(clientReq, 2_500_000);
-    const textToCopy = String(payload.pobLink || payload.pobCode || "");
+    const pobLink = String(payload.pobLink || "");
+    const pobCode = String(payload.pobCode || "");
+    const pobbId = extractPobbIdFromLink(pobLink);
+    const protocolUri = pobbId ? `pob2://pobbin/${pobbId}` : "";
+    const textToCopy = String(pobLink || pobCode || "");
     const copied = await copyToClipboard(textToCopy).catch(error => ({ ok: false, detail: error.message }));
     const pob = detectPobExecutable();
     if (!pob.ok) {
@@ -178,9 +183,16 @@ async function handleBuildAgentOpenPob(clientReq, clientRes) {
       return;
     }
 
-    const child = spawn(pob.path, [], { detached: true, stdio: "ignore", windowsHide: false });
+    const args = protocolUri ? [protocolUri] : [];
+    const child = spawn(pob.path, args, { detached: true, stdio: "ignore", windowsHide: false });
     child.unref();
-    sendJson(clientRes, 200, { ok: true, copied, detail: `Opened Path of Building: ${pob.path}` });
+    sendJson(clientRes, 200, {
+      ok: true,
+      copied,
+      detail: protocolUri
+        ? `Opened Path of Building and requested import via ${protocolUri}.`
+        : `Opened Path of Building: ${pob.path}. PoB code/link was copied for manual import.`,
+    });
   } catch (error) {
     sendJson(clientRes, 500, { error: error.message || "Open PoB failed" });
   }
@@ -298,14 +310,19 @@ async function runBuildAgentJob(job, payload) {
     appendBuildLog(job, status.gemini.ok ? "ok" : "error", status.gemini.detail);
     appendBuildLog(job, status.mcp.ok ? "ok" : "error", status.mcp.detail);
     appendBuildLog(job, status.geminiMcp.ok ? "ok" : "warn", status.geminiMcp.detail);
+    appendBuildLog(job, status.pobBridge.ok ? "ok" : "warn", status.pobBridge.detail);
+    appendBuildLog(job, status.mcpCapabilities.pobBridgeTools.ok ? "ok" : "warn", status.mcpCapabilities.pobBridgeTools.detail);
+    appendBuildLog(job, status.mcpCapabilities.exporter.ok ? "ok" : "warn", status.mcpCapabilities.exporter.detail);
 
     if (!status.gemini.ok) throw new Error("Gemini CLI is not available. Install or fix Gemini CLI first.");
     if (!status.mcp.ok) throw new Error("poe2-mcp is not available. Install poe2-mcp first.");
     if (!status.geminiMcp.ok) throw new Error(`Gemini MCP server ${geminiMcpServerName} is not configured. Run Configure MCP first.`);
 
     const rawAgentEvents = [];
-    const prompt = createGeminiBuildPrompt(payload);
+    const deterministicContext = buildDeterministicBuildContext(payload);
+    const prompt = createGeminiBuildPrompt(payload, deterministicContext);
     appendBuildLog(job, "info", `Goal: ${payload.goal || "(empty)"}`);
+    appendBuildLog(job, "info", `Prepared deterministic context: ${deterministicContext.archetypes.map(archetype => archetype.id).join(", ") || "generic-formula"}.`);
     appendBuildLog(job, "info", "Running gemini -p with stream-json output and poe2-optimizer MCP allowed.");
     const stdout = await runGeminiBuild(job, prompt, rawAgentEvents);
     const agentJson = extractAgentJson(stdout);
@@ -313,8 +330,16 @@ async function runBuildAgentJob(job, payload) {
     if (!isLikelyPobCode(pobCode)) {
       throw new Error("Gemini completed without a real PoB export code. Build rejected to avoid fake output.");
     }
+    const pobValidation = validatePobCodeSemantic(pobCode);
+    if (!pobValidation.ok) {
+      throw new Error(`PoB export is not a meaningful build: ${pobValidation.detail}`);
+    }
+    appendBuildLog(job, "ok", `PoB export semantic check passed: ${pobValidation.detail}`);
 
     const warnings = asStringArray(agentJson.warnings);
+    if (!status.pobBridge.ok || !status.mcpCapabilities.pobBridgeTools.ok) {
+      warnings.push("PoB live bridge metrics are unavailable; any non-PoB calculator metrics must remain estimated.");
+    }
     let pobLink = "";
     let pobbUploadStatus = "not_attempted";
     try {
@@ -334,6 +359,9 @@ async function runBuildAgentJob(job, payload) {
       rawAgentEvents,
       warnings,
       logs: job.logs.map(log => log.message),
+      pobValidation,
+      livePobValidationAvailable: status.pobBridge.ok && status.mcpCapabilities.pobBridgeTools.ok,
+      deterministicContext,
     });
     job.status = "complete";
     job.result = result;
@@ -402,6 +430,7 @@ async function getBuildAgentStatus() {
   const geminiMcp = checkGeminiMcpConfig();
   const pob = detectPobExecutable();
   const pobBridge = await checkPobBridge();
+  const mcpCapabilities = checkPoe2McpCapabilities();
 
   return {
     ok: node.ok && npm.ok && gemini.ok && python.ok && mcp.ok && geminiMcp.ok,
@@ -414,6 +443,7 @@ async function getBuildAgentStatus() {
     geminiMcp,
     pob,
     pobBridge,
+    mcpCapabilities,
   };
 }
 
@@ -465,11 +495,59 @@ function checkPoe2Mcp(pythonCommand) {
   };
 }
 
+function checkPoe2McpCapabilities() {
+  if (!existsSync(poe2McpServerPath)) {
+    return {
+      tools: { ok: false, detail: "poe2-mcp source server file was not found.", names: [] },
+      pobBridgeTools: { ok: false, detail: "Cannot inspect pob_* tools because mcp_server.py was not found.", names: [] },
+      exporter: { ok: false, detail: "Cannot inspect export_pob implementation because source is missing." },
+    };
+  }
+
+  const serverSource = readFileSafe(poe2McpServerPath);
+  const toolNames = [...serverSource.matchAll(/types\.Tool\(\s*name="([^"]+)"/g)].map(match => match[1]);
+  const bridgeToolNames = toolNames.filter(name => name.startsWith("pob_"));
+  const requiredBridgeTools = ["pob_connect", "pob_push_build", "pob_pull_calcs"];
+  const missingBridgeTools = requiredBridgeTools.filter(name => !bridgeToolNames.includes(name));
+  const exporterSource = readFileSafe(join(poe2McpSourceDir, "src", "pob", "exporter.py"));
+  const exporterLooksMeaningful = /Skills|Items|Tree|Spec|SocketGroup|ItemSet/.test(exporterSource)
+    && !/ET\.SubElement\(root,\s*['"]Build['"]\)[\s\S]{0,1200}ET\.tostring\(root/.test(exporterSource);
+
+  return {
+    tools: {
+      ok: toolNames.length > 0,
+      detail: toolNames.length ? `${toolNames.length} MCP tool declarations found in source.` : "No MCP tool declarations found in source.",
+      names: toolNames,
+    },
+    pobBridgeTools: {
+      ok: missingBridgeTools.length === 0,
+      detail: missingBridgeTools.length
+        ? `Missing live bridge tool declarations: ${missingBridgeTools.join(", ")}. README bridge claims cannot be used by the app yet.`
+        : `Live bridge tool declarations found: ${requiredBridgeTools.join(", ")}.`,
+      names: bridgeToolNames,
+    },
+    exporter: {
+      ok: exporterLooksMeaningful,
+      detail: exporterLooksMeaningful
+        ? "export_pob source appears to include build sections beyond the Build shell."
+        : "export_pob source appears shell-only or incomplete; generated PoB codes must pass semantic round-trip before pobb.in upload.",
+    },
+  };
+}
+
+function readFileSafe(path) {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return "";
+  }
+}
+
 function checkGeminiMcpConfig() {
   const result = spawnSync("gemini", ["mcp", "list"], {
     encoding: "utf8",
     shell: process.platform === "win32",
-    timeout: 30_000,
+    timeout: 120_000,
   });
   const output = `${result.stdout || ""}${result.stderr || ""}`.trim();
   if (result.status === 0 && output.includes(geminiMcpServerName)) {
@@ -691,10 +769,10 @@ function handleGeminiStreamLine(job, line, rawAgentEvents) {
     rawAgentEvents.push(event);
     const type = String(event.type || event.event || "event");
     if (type === "tool_use") {
-      const name = event.name || event.tool_name || event.toolUse?.name || "tool";
+      const name = getGeminiToolName(event);
       appendBuildLog(job, "info", `tool_use: ${name}`);
     } else if (type === "tool_result") {
-      const name = event.name || event.tool_name || event.toolResult?.name || "tool";
+      const name = getGeminiToolName(event);
       appendBuildLog(job, "ok", `tool_result: ${name}`);
     } else if (type === "error") {
       appendBuildLog(job, "warn", `gemini error: ${event.message || JSON.stringify(event).slice(0, 260)}`);
@@ -707,7 +785,15 @@ function handleGeminiStreamLine(job, line, rawAgentEvents) {
   }
 }
 
-function createGeminiBuildPrompt(payload) {
+function getGeminiToolName(event) {
+  const explicit = event.name || event.tool_name || event.toolUse?.name || event.toolResult?.name;
+  if (explicit) return String(explicit);
+  const toolId = String(event.tool_id || event.toolUse?.id || event.toolResult?.id || "");
+  if (!toolId) return "tool";
+  return toolId.split("__")[0] || toolId.split("_").slice(0, -1).join("_") || "tool";
+}
+
+function createGeminiBuildPrompt(payload, deterministicContext) {
   const goal = String(payload.goal || "").trim();
   const characterClass = String(payload.characterClass || "Any realistic class").trim();
   const ascendancy = String(payload.ascendancy || "Any realistic ascendancy").trim();
@@ -721,15 +807,24 @@ Ascendancy constraint: ${ascendancy}
 Budget constraint: ${budget}
 League: ${league}
 
+Deterministic context prepared by the launcher:
+${JSON.stringify(deterministicContext, null, 2)}
+
 Hard rules:
 - Follow the workspace GEMINI.md instructions, especially the MCP tool budget and anti-spam policy.
+- Treat the deterministic context above as the source of truth for build reasoning. Do not rediscover generic mechanics with broad explain_mechanic calls unless a named validation is missing.
+- Model damage as hit/burst/window/cycle where appropriate. Do not collapse every build into sheet DPS.
+- Use the provided damage bucket rules: base/added damage, increased bucket, more multipliers, crit expectation, enemy mitigation, hit count, uptime, and combo conditions.
+- Use the provided defense layer rules: avoidance, block, armour/resistance, deflection/less damage taken, recovery, and ailment mitigation.
 - Use no more than 12 MCP tool calls for this request unless a real PoB export tool explicitly requires follow-up.
 - Use no more than 2 explain_mechanic calls. Do not call explain_mechanic for broad exploration.
 - You MUST use poe2-mcp tools where applicable to validate skills/supports, passives/keystones, base items, item mods, and build constraints.
 - You MUST reject impossible/god-gear assumptions. Rare items must be attainable, not perfect all-T1 fantasy gear.
 - You MUST use poe.ninja/build or MCP market/ladder evidence when available to keep the archetype realistic.
 - You MUST export a real Path of Building code using MCP/PoB export/import tools. Do not invent or base64-encode a report.
-- If you cannot produce a real PoB export code, return validation.status "failed" and pobCode "".
+- A real PoB export must contain meaningful skills, items, and passive/tree data. An empty PathOfBuilding/Build shell is failure.
+- If you cannot produce a real PoB export code, return validation.status "blocked" and pobCode "".
+- Use validation.status "validated" only when metrics were pulled from PoB/live bridge. If using MCP calculators or manual aggregate assumptions, use "estimated".
 - If Gemini reports quota/capacity retries, stop broad research and finish with the minimum valid JSON result using already collected evidence.
 - Return ONLY valid JSON, no Markdown fences.
 
@@ -739,6 +834,7 @@ JSON schema:
   "pobCode": "real PoB export code or empty string",
   "pobCodeSource": "mcp_export|pob_live_bridge|none",
   "mcpToolsUsed": ["tool names"],
+  "deterministicContextUsed": ["archetype ids or formula ids used"],
   "build": {
     "name": "string",
     "class": "string",
@@ -750,8 +846,20 @@ JSON schema:
     "skillLinks": ["string"],
     "passivePlan": ["string"]
   },
+  "damageModels": [
+    {
+      "label": "string",
+      "type": "sustained|burst_window|combo_cycle|clear_loop",
+      "mainSkill": "string",
+      "setupSequence": ["string"],
+      "formula": ["string"],
+      "conditions": ["string"],
+      "estimatedOutput": {"key": "value"},
+      "confidence": "high|medium|low"
+    }
+  ],
   "validation": {
-    "status": "validated|estimated|failed",
+    "status": "validated|estimated|blocked|failed",
     "reason": "string",
     "metrics": {"key": "value"}
   },
@@ -763,43 +871,377 @@ JSON schema:
 }`;
 }
 
+function buildDeterministicBuildContext(payload) {
+  const goal = [
+    payload.goal,
+    payload.characterClass,
+    payload.ascendancy,
+    payload.budget,
+    payload.league,
+  ].map(value => String(value || "").toLowerCase()).join(" ");
+  const tags = extractBuildTags(goal);
+  const archetypes = [];
+
+  if (tags.includes("gemling") && (tags.includes("crossbow") || tags.includes("xbow"))) {
+    archetypes.push(createGemlingCrossbowArchetype());
+  }
+  if (tags.includes("grenade") || tags.includes("burst") || tags.includes("boss")) {
+    archetypes.push(createGrenadeBurstArchetype());
+  }
+  if (tags.includes("gemling") && (tags.includes("block") || tags.includes("shield") || tags.includes("deflection") || tags.includes("tanky"))) {
+    archetypes.push(createDeflectiveShieldWallArchetype());
+  }
+  if (archetypes.length === 0 && tags.includes("gemling")) {
+    archetypes.push(createGemlingCrossbowArchetype(), createDeflectiveShieldWallArchetype(), createGrenadeBurstArchetype());
+  }
+
+  return {
+    version: "poe2-mechanic-context-v1",
+    generatedAt: new Date().toISOString(),
+    constraints: {
+      goal: String(payload.goal || ""),
+      class: String(payload.characterClass || ""),
+      ascendancy: String(payload.ascendancy || ""),
+      budget: String(payload.budget || ""),
+      league: String(payload.league || ""),
+    },
+    tags,
+    formulaIds: ["attack_hit_v1", "burst_window_v1", "layered_ehp_v1"],
+    damageBucketRules: [
+      "Base damage comes from the skill and weapon/base item. Added damage is added to base before increased/more scaling.",
+      "All applicable increased/reduced modifiers in the same scope are summed into one additive bucket.",
+      "More/less modifiers are multiplicative and should be listed individually with their condition.",
+      "Expected crit multiplier = 1 + effectiveCritChance * (effectiveCritMultiplier - 1). Cap/round only after the formula is assembled.",
+      "Enemy mitigation must include armour break, penetration, exposure, resistance, and boss-specific reductions when available.",
+      "Burst damage = expected hit damage * effective hit count inside the setup window * conditional multipliers * uptime/reliability.",
+      "Sustained DPS is secondary for combo builds; report it separately from burst window damage.",
+    ],
+    defenseLayerRules: [
+      "EHP is layered, not raw pool: avoidance/evasion, block, armour/resistance, deflection/less damage taken, and recovery each need their own line.",
+      "Avoidance and block reduce expected damage intake but do not protect against every special hit; list unavoidable/unblockable weakness separately.",
+      "Deflection is a damage taken reduction after a hit gets through avoidance layers; do not mix it into evasion.",
+      "Ailment mitigation is mandatory for tank claims because high EHP can still fail to freeze/ignite/shock/bleed/poison style pressure.",
+    ],
+    archetypes,
+    requiredAgentBehavior: [
+      "Pick from these archetypes first when the request matches. Only pivot if a validation tool disproves the archetype.",
+      "Return at least one damageModels entry; do not rely on targetMetrics.dps alone.",
+      "For every high damage claim, include setupSequence, formula terms, conditions, and failure modes.",
+      "Use MCP calls to validate named skills/supports/passives/items, not to rediscover broad game mechanics.",
+      "If PoB code cannot be produced, return blocked honestly with the deterministic formula still filled in.",
+    ],
+  };
+}
+
+function extractBuildTags(text) {
+  const tags = new Set();
+  const checks = [
+    ["gemling", /\bgemling|legionnaire|legion\b/],
+    ["mercenary", /\bmercenary\b/],
+    ["crossbow", /\bcrossbow\b/],
+    ["xbow", /\bxbow\b/],
+    ["grenade", /\bgrenade|cluster|flash grenade|explosive\b/],
+    ["burst", /\bburst|big hit|one shot|1 shot|boss\b/],
+    ["block", /\bblock\b/],
+    ["shield", /\bshield|shield wall|resonating shield\b/],
+    ["deflection", /\bdeflect|deflection|deflective\b/],
+    ["tanky", /\btank|tanky|ehp|surviv/],
+    ["ward", /\bward\b/],
+  ];
+  for (const [tag, pattern] of checks) {
+    if (pattern.test(text)) tags.add(tag);
+  }
+  return [...tags];
+}
+
+function createGemlingCrossbowArchetype() {
+  return {
+    id: "gemling_crossbow_ammunition_engine",
+    label: "Gemling Crossbow Ammunition Engine",
+    class: "Mercenary",
+    ascendancy: "Gemling Legionnaire",
+    primarySkills: ["Shockburst Rounds", "Galvanic Shards"],
+    utilitySkills: ["High Velocity Rounds", "Fragmentation Rounds"],
+    mechanicGraph: [
+      "Fire multiple ammunition types inside 10s to activate Full Salvo.",
+      "Use reload/ammunition passives to keep uptime stable.",
+      "Scale lightning/elemental projectile hits with crit and support-color Gemling bonuses.",
+      "Report single-target as burst/cycle damage if the skill relies on hit count or target state.",
+    ],
+    requiredPassives: [
+      "Full Salvo",
+      "Rapid Reload",
+      "Efficient Loading",
+      "Reusable Ammunition",
+      "Integrated Efficiency",
+      "Crystalline Potential",
+      "Power Shots if crit damage outweighs attack speed loss",
+    ],
+    damageFormula: [
+      "attackBase = crossbowWeaponDamage + flatAddedDamage + skillAddedDamage",
+      "scaledHit = attackBase * (1 + sum(increasedCrossbow + increasedProjectile + increasedElemental + increasedLightning))",
+      "moreHit = scaledHit * product(moreSupportMultipliers)",
+      "critExpectedHit = moreHit * (1 + effectiveCritChance * (effectiveCritMultiplier - 1))",
+      "mitigatedHit = critExpectedHit * enemyMitigationMultiplier(after shock/exposure/penetration if valid)",
+      "cycleDamage = mitigatedHit * effectiveHitsPerCycle * FullSalvoUptime * ammoReliability",
+    ],
+    gearDirection: [
+      "High elemental/physical crossbow with attack speed, crit chance, crit damage, and usable reload/ammunition quality.",
+      "Quiver/offhand stats should prefer projectile/elemental/crit and defensive suffixes.",
+      "Body/helmet/boots/gloves must reserve suffixes for resist, ailment mitigation, and armour/evasion/ES as required by the defense model.",
+    ],
+    failureModes: [
+      "Full Salvo falls off if rotation uses too few ammunition types.",
+      "Sheet DPS can be misleading if reload uptime or projectile overlap is not validated.",
+      "Power Shots can reduce real damage if attack speed/reload is already the bottleneck.",
+    ],
+  };
+}
+
+function createGrenadeBurstArchetype() {
+  return {
+    id: "grenade_armour_break_burst",
+    label: "Grenade Armour Break Burst",
+    class: "Mercenary",
+    ascendancy: "Gemling Legionnaire or Witchhunter depending constraints",
+    primarySkills: ["Cluster Grenade", "Explosive Grenade"],
+    utilitySkills: ["Flash Grenade", "Armour Break setup"],
+    mechanicGraph: [
+      "Use Flash Grenade or control skill to create stun/heavy-stun window.",
+      "Break or fully break armour before the damage payload.",
+      "Stack grenade payloads so delayed detonations land in the same damage window.",
+      "Map clear can be a separate loop from boss burst.",
+    ],
+    requiredPassives: [
+      "Cluster Bombs",
+      "Grenadier",
+      "Repeating Explosives",
+      "Volatile Grenades",
+      "Demolitionist if rotating different grenade types",
+    ],
+    damageFormula: [
+      "grenadeBase = skillBase + weapon/flat added damage if applicable",
+      "setupMultiplier = armourBreakMultiplier * stunWindowReliability * exposureOrPenetrationMultiplier",
+      "payloadHit = grenadeBase * (1 + sum(increasedGrenade + increasedProjectile + increasedArea + increasedElementalOrPhysical)) * product(moreSupports)",
+      "burstWindowDamage = payloadHit * grenadeCount * repeatedExplosionChanceExpectedValue * setupMultiplier",
+      "cycleDamage = burstWindowDamage / setupCooldownSeconds; report separately from burst damage.",
+    ],
+    gearDirection: [
+      "Prioritize grenade level/damage/cooldown or projectile/area scaling before generic sheet DPS.",
+      "Defensive gear must allow standing still long enough to place and detonate the burst package.",
+    ],
+    failureModes: [
+      "If boss cannot be stunned/broken reliably, burst estimate must be downgraded.",
+      "Delayed explosions can miss mobile bosses; include hit reliability.",
+      "DPS number hides the actual build strength, which is burst window damage.",
+    ],
+  };
+}
+
+function createDeflectiveShieldWallArchetype() {
+  return {
+    id: "deflective_evasive_block_shield_wall_gemling",
+    label: "Deflective Evasive Block Shield Wall Gemling",
+    class: "Mercenary",
+    ascendancy: "Gemling Legionnaire",
+    referenceBuilds: [
+      {
+        source: "Mobalytics",
+        url: "https://mobalytics.gg/poe-2/builds/the-tankiest-deflective-block-shield-wall-gemling",
+        pobb: "https://pobb.in/3qVMEwZkvTTK",
+        observedStats: {
+          eHP: "64,484",
+          evade: "83%",
+          evasion: "59,777",
+          armour: "6,869",
+          resistances: "75/75/75/44",
+        },
+      },
+    ],
+    primarySkills: ["Shield Wall", "Resonating Shield"],
+    utilitySkills: ["Charge Regulation", "Combat Frenzy", "Wind Dancer", "Fortifying Cry"],
+    mechanicGraph: [
+      "Stack evasion first so most hits never reach mitigation.",
+      "When a hit passes evasion, block and armour reduce the remainder.",
+      "Deflection adds another damage-taken reduction layer after a hit gets through.",
+      "Shield Wall and Resonating Shield convert shield/armour investment into bossing and mapping damage.",
+      "Armour Break plus Armour Explosion turns Resonating Shield into a clear loop.",
+      "Combat Frenzy + Pin + Armour Break III sustains charge engine for speed/evasion uptime.",
+    ],
+    requiredPassives: [
+      "Enduring Deflection",
+      "The Wild Cat",
+      "Natural Immunity",
+      "Charge Regulation",
+      "Combat Frenzy",
+      "Constricting Command package if the nearby-enemy roll is valid",
+    ],
+    damageFormula: [
+      "shieldHitBase = ShieldWallOrResonatingShieldBase + shield/armour-derived scaling if validated by PoB",
+      "breakSetup = armourBreakMultiplier * ArmourExplosionExpectedValue",
+      "scaledHit = shieldHitBase * (1 + sum(increasedArmourSkill + increasedMelee + increasedArea + increasedPhysical))",
+      "burstOrClearHit = scaledHit * product(moreSupports) * breakSetup * chargeUptimeMultiplier",
+      "Report Shield Wall boss damage and Resonating Shield clear loop separately.",
+    ],
+    defenseFormula: [
+      "rawPool = life + energyShield + other validated pools",
+      "hitThroughAvoidance = incomingHit * (1 - evadeChance)",
+      "hitAfterBlockExpectation = hitThroughAvoidance * (1 - blockChance)",
+      "hitAfterMitigation = hitAfterBlockExpectation * armourOrResistanceMultiplier * (1 - deflectionReduction)",
+      "effectiveEhp = rawPool / finalDamageTakenMultiplier",
+    ],
+    gearDirection: [
+      "Hyrri's Ire or equivalent evasion anchor to push evasion/evade high.",
+      "Shield and armour/evasion slots should be selected for the skill formula, not only generic defenses.",
+      "Solve ailments with Natural Immunity or gear because high avoidance does not stop ailment failure modes.",
+    ],
+    failureModes: [
+      "Unavoidable or unblockable hits bypass the strongest layers.",
+      "Damage and tankiness depend on active buffs/config; result must state config assumptions.",
+      "Constricting Command needs the correct nearby-enemy roll/condition.",
+    ],
+  };
+}
+
 function extractAgentJson(stdout) {
-  const resultEvent = stdout.split(/\r?\n/).reverse().map(line => {
+  const events = stdout.split(/\r?\n/).map(line => {
     try { return JSON.parse(line); } catch { return null; }
-  }).find(event => event && (event.type === "result" || event.response));
+  }).filter(Boolean);
+  const assistantText = events
+    .filter(event => event.type === "message" && event.role === "assistant" && typeof event.content === "string")
+    .map(event => event.content)
+    .join("");
+  if (assistantText.trim()) return parseFirstJsonObject(assistantText);
+
+  const resultEvent = [...events].reverse().find(event => event && (event.type === "result" || event.response));
   const responseText = resultEvent?.response || resultEvent?.result?.response || stdout;
   if (typeof responseText === "object" && responseText) return responseText;
   const text = String(responseText);
   const fenced = text.match(/```json\s*([\s\S]*?)```/i) || text.match(/```\s*([\s\S]*?)```/i);
-  const candidate = fenced ? fenced[1] : text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1);
-  return JSON.parse(candidate);
+  return parseFirstJsonObject(fenced ? fenced[1] : text);
+}
+
+function parseFirstJsonObject(text) {
+  const source = String(text);
+  const start = source.indexOf("{");
+  if (start < 0) throw new Error("Gemini response did not contain a JSON object.");
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < source.length; index += 1) {
+    const char = source[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === "\"") {
+      inString = true;
+    } else if (char === "{") {
+      depth += 1;
+    } else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        const candidate = source.slice(start, index + 1);
+        return JSON.parse(candidate);
+      }
+    }
+  }
+
+  throw new Error("Gemini response contained an incomplete JSON object.");
 }
 
 function isLikelyPobCode(code) {
   return /^[A-Za-z0-9+/_=-]{200,}$/.test(code.trim());
 }
 
+function validatePobCodeSemantic(code) {
+  const xml = decodePobXml(code);
+  if (!xml) {
+    return { ok: false, detail: "PoB code could not be decompressed into XML." };
+  }
+
+  const hasBuild = /<Build\b/i.test(xml);
+  const itemCount = countXmlTags(xml, "Item");
+  const socketGroupCount = countXmlTags(xml, "SocketGroup") + countXmlTags(xml, "Skill");
+  const hasMeaningfulItems = /<Items\b/i.test(xml) && itemCount > 0;
+  const hasMeaningfulSkills = /<Skills\b/i.test(xml) && socketGroupCount > 0;
+  const hasTree = /<(Tree|Spec)\b/i.test(xml) || /nodes="[^"]{20,}"/i.test(xml) || /<URL\b/i.test(xml);
+
+  if (!hasBuild) return { ok: false, detail: "XML has no Build section." };
+  if (!hasMeaningfulSkills || !hasMeaningfulItems || !hasTree) {
+    return {
+      ok: false,
+      detail: `Missing required build sections: skills=${hasMeaningfulSkills}, items=${hasMeaningfulItems}, tree=${hasTree}.`,
+      xmlExcerpt: xml.slice(0, 500),
+    };
+  }
+
+  return {
+    ok: true,
+    detail: `items=${itemCount}, skillGroups=${socketGroupCount}, tree=true.`,
+  };
+}
+
+function decodePobXml(code) {
+  const trimmed = String(code || "").trim();
+  if (!trimmed) return "";
+  const normalizedBase64 = trimmed
+    .replace(/-/g, "+")
+    .replace(/_/g, "/")
+    .padEnd(Math.ceil(trimmed.length / 4) * 4, "=");
+  let buffer;
+  try {
+    buffer = Buffer.from(normalizedBase64, "base64");
+  } catch {
+    return "";
+  }
+
+  for (const inflate of [inflateSync, inflateRawSync]) {
+    try {
+      const xml = inflate(buffer).toString("utf8");
+      if (/<PathOfBuilding2?\b/i.test(xml)) return xml;
+    } catch {
+      // Try the next compression flavor used by PoB variants.
+    }
+  }
+  return "";
+}
+
+function countXmlTags(xml, tagName) {
+  const matches = xml.match(new RegExp(`<${tagName}\\b`, "gi"));
+  return matches ? matches.length : 0;
+}
+
 function normalizeBuildAgentResult(payload, agentJson, context) {
   const validation = agentJson.validation && typeof agentJson.validation === "object"
     ? agentJson.validation
     : { status: "estimated", reason: "Gemini returned no validation object." };
+  const normalizedValidation = normalizeValidation(validation, context);
   return {
     goal: String(payload.goal || ""),
     generatedAt: new Date().toISOString(),
     provider: "gemini",
     mcpToolsUsed: asStringArray(agentJson.mcpToolsUsed),
+    deterministicContext: context.deterministicContext || buildDeterministicBuildContext(payload),
+    deterministicContextUsed: asStringArray(agentJson.deterministicContextUsed),
     pobCodeSource: String(agentJson.pobCodeSource || "mcp_export"),
     pobbUploadStatus: context.pobbUploadStatus,
     pobOpenStatus: "",
     assumptions: asStringArray(agentJson.assumptions),
     pobLink: context.pobLink,
     pobCode: context.pobCode,
+    pobSemanticValidation: context.pobValidation || { ok: false, detail: "" },
     build: agentJson.build || null,
-    validation: {
-      status: ["validated", "estimated", "failed"].includes(validation.status) ? validation.status : "estimated",
-      reason: String(validation.reason || ""),
-      metrics: validation.metrics || {},
-    },
+    damageModels: Array.isArray(agentJson.damageModels) ? agentJson.damageModels : [],
+    validation: normalizedValidation,
     validatedMetrics: objectOrEmpty(agentJson.validatedMetrics),
     estimatedMetrics: objectOrEmpty(agentJson.estimatedMetrics),
     marketEvidence: asStringArray(agentJson.marketEvidence),
@@ -816,14 +1258,18 @@ function failedBuildResult(payload, reason, logs) {
     generatedAt: new Date().toISOString(),
     provider: "gemini",
     mcpToolsUsed: [],
+    deterministicContext: buildDeterministicBuildContext(payload),
+    deterministicContextUsed: [],
     pobCodeSource: "none",
     pobbUploadStatus: "not_attempted",
     pobOpenStatus: "",
     assumptions: [],
     pobLink: "",
     pobCode: "",
+    pobSemanticValidation: { ok: false, detail: reason },
     build: null,
-    validation: { status: "failed", reason },
+    damageModels: [],
+    validation: { status: "blocked", reason },
     validatedMetrics: {},
     estimatedMetrics: {},
     marketEvidence: [],
@@ -831,6 +1277,26 @@ function failedBuildResult(payload, reason, logs) {
     rawAgentEvents: [],
     logs: logs.map(log => log.message),
     warnings: [reason],
+  };
+}
+
+function normalizeValidation(validation, context) {
+  const rawStatus = String(validation.status || "estimated");
+  let status = ["validated", "estimated", "blocked", "failed"].includes(rawStatus) ? rawStatus : "estimated";
+  const warnings = context.warnings || [];
+  const reasonParts = [String(validation.reason || "").trim()].filter(Boolean);
+
+  if (status === "validated" && !context.livePobValidationAvailable) {
+    status = "estimated";
+    const message = "Downgraded from validated because PoB live bridge metrics are unavailable.";
+    warnings.push(message);
+    reasonParts.push(message);
+  }
+
+  return {
+    status,
+    reason: reasonParts.join(" "),
+    metrics: validation.metrics || {},
   };
 }
 
@@ -844,26 +1310,17 @@ function objectOrEmpty(value) {
 
 function createPobbLink(pobCode) {
   return new Promise((resolvePromise, rejectPromise) => {
-    const body = JSON.stringify({
-      as_user: false,
-      content: pobCode,
-      title: "",
-      custom_id: "",
-      id: null,
-      pinned: false,
-      private: false,
-    });
+    const body = String(pobCode || "");
     const req = httpsRequest(
       {
         protocol: "https:",
         hostname: "pobb.in",
         method: "POST",
-        path: "/api/internal/paste/",
+        path: "/pob/",
         headers: {
-          "content-type": "application/json",
           "content-length": Buffer.byteLength(body),
-          "user-agent": "POE2 Sniper Launcher (local app)",
-          "accept": "application/json, text/plain",
+          "user-agent": "Path of Building/0.17.1",
+          "accept": "text/plain, application/json",
         },
       },
       (res) => {
@@ -891,16 +1348,26 @@ function createPobbLink(pobCode) {
 }
 
 function parsePobbId(body) {
+  const trimmed = String(body || "").trim();
+  const fromUrl = extractPobbIdFromLink(trimmed);
+  if (fromUrl) return fromUrl;
+  if (/^[A-Za-z0-9_-]{4,64}$/.test(trimmed)) return trimmed;
   try {
-    const parsed = JSON.parse(body);
-    if (typeof parsed === "string") return parsed.replace(/^"|"$/g, "");
-    if (parsed?.id) return String(parsed.id);
-    if (parsed?.Paste) return String(parsed.Paste);
+    const parsed = JSON.parse(trimmed);
+    if (typeof parsed === "string") return parsePobbId(parsed);
+    if (parsed?.id) return parsePobbId(String(parsed.id));
+    if (parsed?.Paste) return parsePobbId(String(parsed.Paste));
+    if (parsed?.url) return parsePobbId(String(parsed.url));
   } catch {
-    const trimmed = body.trim();
-    if (/^[A-Za-z0-9_-]{6,32}$/.test(trimmed)) return trimmed;
+    // Response may be plain text; invalid JSON is expected for pobb.in /pob/.
   }
   return "";
+}
+
+function extractPobbIdFromLink(value) {
+  const text = String(value || "").trim();
+  const match = text.match(/(?:https?:\/\/)?pobb\.in\/(?:pob\/)?([A-Za-z0-9_-]{4,64})(?:[/?#].*)?$/i);
+  return match ? match[1] : "";
 }
 
 function copyToClipboard(text) {

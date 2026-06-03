@@ -228,6 +228,9 @@ function RuntimeSetup({ status, running, onAction }: {
     ["Python", status.python],
     ["poe2-mcp", status.mcp],
     ["Gemini MCP", status.geminiMcp],
+    ["MCP Tools", status.mcpCapabilities.tools],
+    ["PoB Bridge Tools", status.mcpCapabilities.pobBridgeTools],
+    ["PoB Exporter", status.mcpCapabilities.exporter],
     ["PoB App", status.pob],
     ["PoB Bridge", status.pobBridge],
   ] as const : [];
@@ -297,6 +300,9 @@ function BuildResult({ result, onCopy, onOpenPob, pobOpenStatus }: {
           <div className="opp-sub">
             PoB source: {result.pobCodeSource} | pobb.in: {result.pobbUploadStatus}
           </div>
+          <div className="opp-sub">
+            PoB semantic: {result.pobSemanticValidation.ok ? "valid" : "blocked"} - {result.pobSemanticValidation.detail}
+          </div>
           {pobOpenStatus && <div className="opp-sub">{pobOpenStatus}</div>}
         </div>
         <div className="build-actions">
@@ -324,6 +330,8 @@ function BuildResult({ result, onCopy, onOpenPob, pobOpenStatus }: {
           ]} />
           <SummaryBlock title="Validated Metrics" items={recordItems(result.validatedMetrics)} />
           <SummaryBlock title="Estimated Metrics" items={recordItems(result.estimatedMetrics)} />
+          <SummaryBlock title="Damage Models" items={damageModelItems(result.damageModels)} />
+          <SummaryBlock title="Deterministic Context" items={deterministicContextItems(result)} />
           <SummaryBlock title="MCP Tools" items={result.mcpToolsUsed} />
           <SummaryBlock title="Defenses" items={build.defenses} />
           <SummaryBlock title="Gear Plan" items={build.gearPlan} />
@@ -357,4 +365,26 @@ function SummaryBlock({ title, items }: { title: string; items: string[] }) {
 
 function recordItems(record: Record<string, string>) {
   return Object.entries(record).map(([key, value]) => `${key}: ${value}`);
+}
+
+function damageModelItems(models: BuildAgentResult["damageModels"]) {
+  return models.flatMap(model => [
+    `${model.label || "Damage model"} (${model.type || "unknown"})`,
+    `Main: ${model.mainSkill || "not specified"}`,
+    ...model.setupSequence.map(step => `Setup: ${step}`),
+    ...model.formula.map(term => `Formula: ${term}`),
+    ...recordItems(model.estimatedOutput || {}).map(item => `Estimate: ${item}`),
+    `Confidence: ${model.confidence || "unknown"}`,
+  ]);
+}
+
+function deterministicContextItems(result: BuildAgentResult) {
+  const context = result.deterministicContext;
+  const archetypes = context?.archetypes || [];
+  return [
+    ...(context?.formulaIds || []).map(id => `Formula: ${id}`),
+    ...archetypes.map(archetype => `${archetype.id}: ${archetype.label}`),
+    ...archetypes.flatMap(archetype => (archetype.mechanicGraph || []).slice(0, 4).map(step => `${archetype.id}: ${step}`)),
+    ...(result.deterministicContextUsed || []).map(id => `Used: ${id}`),
+  ];
 }
