@@ -1,7 +1,13 @@
 export interface BuildAgentStatus {
   ok: boolean;
+  node: { ok: boolean; command: string; detail: string };
+  npm: { ok: boolean; command: string; detail: string };
   python: { ok: boolean; command: string; detail: string };
+  gemini: { ok: boolean; command: string; detail: string };
+  geminiAuth: { ok: boolean; detail: string };
   mcp: { ok: boolean; detail: string };
+  geminiMcp: { ok: boolean; serverName: string; detail: string };
+  pob: { ok: boolean; path: string; detail: string };
   pobBridge: { ok: boolean; detail: string };
 }
 
@@ -19,9 +25,21 @@ export interface BuildAgentLog {
   message: string;
 }
 
+export interface BuildSetupResult {
+  ok: boolean;
+  action: string;
+  error?: string;
+  logs: string[];
+}
+
 export interface BuildAgentResult {
   goal: string;
   generatedAt: string;
+  provider: string;
+  mcpToolsUsed: string[];
+  pobCodeSource: string;
+  pobbUploadStatus: string;
+  pobOpenStatus: string;
   assumptions: string[];
   pobLink: string;
   pobCode: string;
@@ -41,8 +59,11 @@ export interface BuildAgentResult {
     metrics?: Record<string, string>;
     reason: string;
   };
+  validatedMetrics: Record<string, string>;
+  estimatedMetrics: Record<string, string>;
   marketEvidence: string[];
   rejectedIdeas: string[];
+  rawAgentEvents: unknown[];
   logs: string[];
   warnings: string[];
 }
@@ -63,11 +84,31 @@ export async function generateBuild(request: BuildAgentRequest): Promise<{ jobId
   return res.json();
 }
 
+export async function runBuildAgentSetup(action: string): Promise<{ jobId: string }> {
+  const res = await fetch("/local/build-agent/setup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action }),
+  });
+  if (!res.ok) throw new Error(`Build agent setup failed: ${res.status}`);
+  return res.json();
+}
+
+export async function openBuildInPob(payload: { pobCode: string; pobLink?: string }): Promise<{ ok: boolean; copied?: { ok: boolean; detail: string }; detail: string }> {
+  const res = await fetch("/local/build-agent/open-pob", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(`Open PoB failed: ${res.status}`);
+  return res.json();
+}
+
 export function subscribeBuildJob(
   jobId: string,
   handlers: {
     onLog: (log: BuildAgentLog) => void;
-    onResult: (result: BuildAgentResult, status: string) => void;
+    onResult: (result: BuildAgentResult | BuildSetupResult, status: string) => void;
     onError: (error: string) => void;
   }
 ) {

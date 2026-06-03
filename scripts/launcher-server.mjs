@@ -1,7 +1,9 @@
 import { createServer } from "node:http";
 import { request as httpsRequest } from "node:https";
+import { Socket } from "node:net";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, createReadStream, statSync } from "node:fs";
+import { existsSync, createReadStream, statSync, readdirSync } from "node:fs";
+import { homedir } from "node:os";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -13,7 +15,16 @@ const args = new Set(process.argv.slice(2));
 const shouldOpen = !args.has("--no-open");
 const notifyActions = new Map();
 const buildJobs = new Map();
+const setupJobs = new Map();
 let activePort = defaultPort;
+const geminiMcpServerName = "poe2-optimizer";
+const geminiMcpCommand = "poe2-mcp";
+const toolsDir = join(rootDir, "tools");
+const poe2McpSourceDir = join(toolsDir, "poe2-mcp");
+const poe2McpLaunchPath = join(poe2McpSourceDir, "launch.py");
+const pobPortableDir = join(toolsDir, "PathOfBuilding-PoE2");
+const pobPortableZip = join(toolsDir, "PathOfBuildingCommunity-PoE2-Portable.zip");
+const pobPortableUrl = "https://github.com/PathOfBuildingCommunity/PathOfBuilding-PoE2/releases/download/v0.17.1/PathOfBuildingCommunity-PoE2-Portable.zip";
 
 const mimeTypes = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -83,13 +94,23 @@ function startServer(port) {
       return;
     }
 
+    if (req.url.startsWith("/local/build-agent/setup")) {
+      handleBuildAgentSetup(req, res);
+      return;
+    }
+
+    if (req.url.startsWith("/local/build-agent/open-pob")) {
+      handleBuildAgentOpenPob(req, res);
+      return;
+    }
+
     if (req.url.startsWith("/local/build-agent/generate")) {
       handleBuildAgentGenerate(req, res);
       return;
     }
 
     if (req.url.startsWith("/local/build-agent/logs")) {
-      handleBuildAgentLogs(req, res);
+      handleJobLogs(req, res);
       return;
     }
 
@@ -117,18 +138,51 @@ function startServer(port) {
   });
 }
 
-function handleBuildAgentStatus(_clientReq, clientRes) {
-  const python = findPython();
-  const mcp = python.ok ? checkPoe2Mcp(python.command) : { ok: false, detail: "Python is not available." };
-  sendJson(clientRes, 200, {
-    ok: python.ok && mcp.ok,
-    python,
-    mcp,
-    pobBridge: {
-      ok: false,
-      detail: "Live PoB bridge is optional and checked during generation when poe2-mcp is available.",
-    },
-  });
+async function handleBuildAgentStatus(_clientReq, clientRes) {
+  sendJson(clientRes, 200, await getBuildAgentStatus());
+}
+
+async function handleBuildAgentSetup(clientReq, clientRes) {
+  if (clientReq.method !== "POST") {
+    sendJson(clientRes, 405, { error: "Method not allowed" });
+    return;
+  }
+
+  try {
+    const payload = await readJsonBody(clientReq, 16_000);
+    const action = String(payload.action || "");
+    const jobId = `setup-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const job = createJob(jobId);
+    setupJobs.set(jobId, job);
+    sendJson(clientRes, 200, { ok: true, jobId });
+    void runSetupJob(job, action);
+  } catch (error) {
+    sendJson(clientRes, 500, { error: error.message || "Setup action failed" });
+  }
+}
+
+async function handleBuildAgentOpenPob(clientReq, clientRes) {
+  if (clientReq.method !== "POST") {
+    sendJson(clientRes, 405, { error: "Method not allowed" });
+    return;
+  }
+
+  try {
+    const payload = await readJsonBody(clientReq, 2_500_000);
+    const textToCopy = String(payload.pobLink || payload.pobCode || "");
+    const copied = await copyToClipboard(textToCopy).catch(error => ({ ok: false, detail: error.message }));
+    const pob = detectPobExecutable();
+    if (!pob.ok) {
+      sendJson(clientRes, 200, { ok: false, copied, detail: `${pob.detail} PoB code/link was copied if clipboard access succeeded.` });
+      return;
+    }
+
+    const child = spawn(pob.path, [], { detached: true, stdio: "ignore", windowsHide: false });
+    child.unref();
+    sendJson(clientRes, 200, { ok: true, copied, detail: `Opened Path of Building: ${pob.path}` });
+  } catch (error) {
+    sendJson(clientRes, 500, { error: error.message || "Open PoB failed" });
+  }
 }
 
 async function handleBuildAgentGenerate(clientReq, clientRes) {
@@ -140,14 +194,7 @@ async function handleBuildAgentGenerate(clientReq, clientRes) {
   try {
     const payload = await readJsonBody(clientReq, 64_000);
     const jobId = `build-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const job = {
-      id: jobId,
-      status: "running",
-      logs: [],
-      result: null,
-      listeners: new Set(),
-      createdAt: Date.now(),
-    };
+    const job = createJob(jobId);
     buildJobs.set(jobId, job);
     sendJson(clientRes, 200, { ok: true, jobId });
     void runBuildAgentJob(job, payload);
@@ -156,10 +203,10 @@ async function handleBuildAgentGenerate(clientReq, clientRes) {
   }
 }
 
-function handleBuildAgentLogs(clientReq, clientRes) {
+function handleJobLogs(clientReq, clientRes) {
   const url = new URL(clientReq.url, `http://127.0.0.1:${activePort}`);
   const jobId = url.searchParams.get("jobId") || "";
-  const job = buildJobs.get(jobId);
+  const job = buildJobs.get(jobId) || setupJobs.get(jobId);
   if (!job) {
     sendJson(clientRes, 404, { error: "Build job not found" });
     return;
@@ -180,63 +227,121 @@ function handleBuildAgentLogs(clientReq, clientRes) {
   clientReq.on("close", () => job.listeners.delete(send));
 }
 
+function createJob(id) {
+  return {
+    id,
+    status: "running",
+    logs: [],
+    result: null,
+    listeners: new Set(),
+    createdAt: Date.now(),
+  };
+}
+
+async function runSetupJob(job, action) {
+  try {
+    appendBuildLog(job, "info", `Running setup action: ${action}`);
+    if (action === "install-gemini") {
+      await runLoggedCommand(job, "npm", ["install", "-g", "@google/gemini-cli"], { timeoutMs: 10 * 60_000 });
+    } else if (action === "login-gemini") {
+      openVisibleTerminal("gemini");
+      appendBuildLog(job, "ok", "Opened Gemini CLI in a visible terminal. Complete OAuth there, then re-check runtime.");
+    } else if (action === "install-poe2-mcp") {
+      const python = findPython();
+      if (!python.ok) throw new Error(python.detail);
+      if (!existsSync(poe2McpSourceDir)) {
+        await runLoggedCommand(job, "git", ["clone", "--depth", "1", "https://github.com/HivemindOverlord/poe2-mcp.git", poe2McpSourceDir], { timeoutMs: 10 * 60_000 });
+      } else {
+        await runLoggedCommand(job, "git", ["-C", poe2McpSourceDir, "pull", "--ff-only"], { timeoutMs: 5 * 60_000 });
+      }
+      const args = python.command === "py"
+        ? ["-3", "-m", "pip", "install", "-e", poe2McpSourceDir]
+        : ["-m", "pip", "install", "-e", poe2McpSourceDir];
+      await runLoggedCommand(job, python.command, args, { timeoutMs: 20 * 60_000 });
+    } else if (action === "configure-mcp") {
+      await runLoggedCommand(job, "gemini", getGeminiMcpAddArgs(), { timeoutMs: 120_000 });
+    } else if (action === "check-mcp") {
+      await runLoggedCommand(job, "gemini", ["mcp", "list"], { timeoutMs: 120_000 });
+    } else if (action === "install-pob") {
+      await runLoggedCommand(job, "powershell.exe", [
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-Command",
+        `$ErrorActionPreference='Stop'; New-Item -ItemType Directory -Force -Path '${escapePowerShellString(toolsDir)}' | Out-Null; Invoke-WebRequest -Uri '${pobPortableUrl}' -OutFile '${escapePowerShellString(pobPortableZip)}'; if (Test-Path '${escapePowerShellString(pobPortableDir)}') { Remove-Item -LiteralPath '${escapePowerShellString(pobPortableDir)}' -Recurse -Force }; Expand-Archive -LiteralPath '${escapePowerShellString(pobPortableZip)}' -DestinationPath '${escapePowerShellString(pobPortableDir)}' -Force`,
+      ], { timeoutMs: 30 * 60_000 });
+    } else if (action === "open-pob") {
+      const pob = detectPobExecutable();
+      if (!pob.ok) throw new Error(pob.detail);
+      const child = spawn(pob.path, [], { detached: true, stdio: "ignore", windowsHide: false });
+      child.unref();
+      appendBuildLog(job, "ok", `Opened Path of Building: ${pob.path}`);
+    } else {
+      throw new Error(`Unknown setup action: ${action}`);
+    }
+    job.status = "complete";
+    job.result = { ok: true, action, logs: job.logs.map(log => log.message) };
+    emitBuildEvent(job, { type: "result", status: job.status, result: job.result });
+    cleanupJobs();
+  } catch (error) {
+    appendBuildLog(job, "error", error.message || "Setup action failed.");
+    job.status = "error";
+    job.result = { ok: false, action, error: error.message || "Setup action failed.", logs: job.logs.map(log => log.message) };
+    emitBuildEvent(job, { type: "result", status: job.status, result: job.result });
+  }
+}
+
 async function runBuildAgentJob(job, payload) {
   try {
-    appendBuildLog(job, "info", "Starting headless PoB build agent.");
-    const python = findPython();
-    appendBuildLog(job, python.ok ? "ok" : "warn", python.detail);
-    const mcp = python.ok ? checkPoe2Mcp(python.command) : { ok: false, detail: "poe2-mcp not checked because Python is missing." };
-    appendBuildLog(job, mcp.ok ? "ok" : "warn", mcp.detail);
+    appendBuildLog(job, "info", "Starting Gemini headless build agent.");
+    const status = await getBuildAgentStatus();
+    appendBuildLog(job, status.gemini.ok ? "ok" : "error", status.gemini.detail);
+    appendBuildLog(job, status.mcp.ok ? "ok" : "error", status.mcp.detail);
+    appendBuildLog(job, status.geminiMcp.ok ? "ok" : "warn", status.geminiMcp.detail);
 
+    if (!status.gemini.ok) throw new Error("Gemini CLI is not available. Install or fix Gemini CLI first.");
+    if (!status.mcp.ok) throw new Error("poe2-mcp is not available. Install poe2-mcp first.");
+    if (!status.geminiMcp.ok) throw new Error(`Gemini MCP server ${geminiMcpServerName} is not configured. Run Configure MCP first.`);
+
+    const rawAgentEvents = [];
+    const prompt = createGeminiBuildPrompt(payload);
     appendBuildLog(job, "info", `Goal: ${payload.goal || "(empty)"}`);
-    appendBuildLog(job, "info", "Applying trade-realistic mid budget defaults: 20-50 divine, no god rares.");
-    await delay(250);
+    appendBuildLog(job, "info", "Running gemini -p with stream-json output and poe2-optimizer MCP allowed.");
+    const stdout = await runGeminiBuild(job, prompt, rawAgentEvents);
+    const agentJson = extractAgentJson(stdout);
+    const pobCode = String(agentJson.pobCode || "").trim();
+    if (!isLikelyPobCode(pobCode)) {
+      throw new Error("Gemini completed without a real PoB export code. Build rejected to avoid fake output.");
+    }
 
-    const report = buildDeterministicBuildReport(payload, { python, mcp });
-    appendBuildLog(job, "info", "Selected a conservative build method from parsed goal constraints.");
-    appendBuildLog(job, "info", "Marked metrics as estimated unless a live PoB bridge validates them.");
-    await delay(250);
-
-    const pobCode = createFallbackPobCode(report);
-    const pobLink = await tryCreatePobbLink(pobCode).catch(error => {
+    const warnings = asStringArray(agentJson.warnings);
+    let pobLink = "";
+    let pobbUploadStatus = "not_attempted";
+    try {
+      pobLink = await createPobbLink(pobCode);
+      pobbUploadStatus = "success";
+      appendBuildLog(job, "ok", `Created pobb.in link: ${pobLink}`);
+    } catch (error) {
+      pobbUploadStatus = `failed: ${error.message}`;
+      warnings.push(`pobb.in upload failed: ${error.message}`);
       appendBuildLog(job, "warn", `pobb.in upload failed: ${error.message}`);
-      return "";
-    });
-    if (pobLink) appendBuildLog(job, "ok", `Created pobb.in link: ${pobLink}`);
+    }
 
-    const result = {
-      goal: String(payload.goal || ""),
-      generatedAt: new Date().toISOString(),
-      assumptions: report.assumptions,
-      pobLink,
+    const result = normalizeBuildAgentResult(payload, agentJson, {
       pobCode,
-      build: report.build,
-      validation: report.validation,
-      marketEvidence: report.marketEvidence,
-      rejectedIdeas: report.rejectedIdeas,
+      pobLink,
+      pobbUploadStatus,
+      rawAgentEvents,
+      warnings,
       logs: job.logs.map(log => log.message),
-      warnings: report.warnings,
-    };
+    });
     job.status = "complete";
     job.result = result;
     emitBuildEvent(job, { type: "result", status: job.status, result });
-    cleanupBuildJobs();
+    cleanupJobs();
   } catch (error) {
     appendBuildLog(job, "error", error.message || "Build generation failed.");
     job.status = "error";
-    job.result = {
-      goal: String(payload.goal || ""),
-      generatedAt: new Date().toISOString(),
-      assumptions: [],
-      pobLink: "",
-      pobCode: "",
-      build: null,
-      validation: { status: "failed", reason: error.message || "Build generation failed." },
-      marketEvidence: [],
-      rejectedIdeas: [],
-      logs: job.logs.map(log => log.message),
-      warnings: [error.message || "Build generation failed."],
-    };
+    job.result = failedBuildResult(payload, error.message || "Build generation failed.", job.logs);
     emitBuildEvent(job, { type: "result", status: job.status, result: job.result });
   }
 }
@@ -249,103 +354,6 @@ function appendBuildLog(job, level, message) {
 
 function emitBuildEvent(job, event) {
   for (const listener of job.listeners) listener(event);
-}
-
-function buildDeterministicBuildReport(payload, runtime) {
-  const goal = String(payload.goal || "").toLowerCase();
-  const wantsBlock = goal.includes("block");
-  const wantsTank = goal.includes("tank") || goal.includes("ehp") || goal.includes("tanky");
-  const wantsDamage = goal.match(/1\s*m|1m|million|triệu|damage|dps/);
-  const budget = payload.budget || "20-50 divine";
-
-  const archetype = wantsBlock
-    ? "Block Titan Warbringer"
-    : wantsTank
-      ? "Armour/Evasion Hybrid Titan"
-      : "Balanced Endgame Mapper";
-  const mainSkill = wantsBlock ? "Shield-focused melee setup" : "High uptime weapon skill";
-
-  const warnings = [];
-  if (!runtime.mcp.ok) {
-    warnings.push("poe2-mcp is not available, so this MVP report is estimated and must be validated after installing MCP/PoB bridge.");
-  }
-  warnings.push("No perfect rare items were assumed; rare gear uses attainable life/resistance/defense/moderate damage tiers.");
-
-  return {
-    assumptions: [
-      `Budget: ${budget}`,
-      "League: current POE2 trade league unless specified",
-      "No god rare items, no impossible support combinations, no invalid mod stacking",
-      "PoB UI is external; this app only outputs code/link/report",
-    ],
-    build: {
-      name: archetype,
-      class: wantsBlock ? "Warrior" : "Flexible tank archetype",
-      ascendancy: wantsBlock ? "Titan or Warbringer depending on shield/block scaling" : "Titan-style defensive scaling",
-      mainSkill,
-      defenses: [
-        "Cap elemental resistances",
-        "Prioritize armour/evasion or armour/block depending on tree path",
-        "Use life on every rare slot where possible",
-        wantsBlock ? "Stack block chance from shield, passives, and legal item modifiers" : "Use layered mitigation instead of one defensive gimmick",
-      ],
-      targetMetrics: {
-        ehp: wantsTank ? "100k target requested; status estimated until PoB bridge validates" : "Not requested",
-        dps: wantsDamage ? "1M target requested; status estimated until PoB bridge validates" : "Not requested",
-      },
-      gearPlan: [
-        "Weapon: realistic high damage rare, not perfect all-T1",
-        "Shield: high block/defense base if block route is selected",
-        "Body/helmet/gloves/boots: life + resist + armour/evasion/ward as available",
-        "Jewellery: solve attributes/resists first, add damage only after defensive targets",
-      ],
-      skillLinks: [
-        `${mainSkill} + validated damage supports`,
-        "Defensive aura/reservation setup after spirit budget is known",
-        "Utility skill package for mobility, curse/exposure, and guard/mitigation if legal",
-      ],
-      passivePlan: [
-        wantsBlock ? "Path through block clusters and shield defense nodes" : "Path through life/defense clusters first",
-        "Take keystones only after MCP/PoB validation confirms synergy",
-        "Avoid pathing that depends on unavailable uniques or impossible attributes",
-      ],
-    },
-    validation: {
-      status: runtime.mcp.ok ? "estimated" : "failed",
-      metrics: {
-        ehp: runtime.mcp.ok ? "estimated" : "not validated",
-        dps: runtime.mcp.ok ? "estimated" : "not validated",
-      },
-      reason: runtime.mcp.ok
-        ? "MCP runtime detected. Full tool-by-tool validation should be wired to registered MCP calls in the next iteration."
-        : "Install poe2-mcp and Path of Building bridge to validate EHP/DPS and export a real PoB code.",
-    },
-    marketEvidence: [
-      "Use poe.ninja build/economy as evidence for common archetypes and unique availability.",
-      "Any expensive unique must be checked against live trade before finalizing the build.",
-    ],
-    rejectedIdeas: [
-      "Rejected perfect all-T1 rare gear assumptions.",
-      "Rejected unsupported skill/support combinations until MCP validation confirms legality.",
-      "Rejected target-metric claims without PoB/live bridge validation.",
-    ],
-    warnings,
-  };
-}
-
-function createFallbackPobCode(report) {
-  const payload = {
-    app: "POE2 Sniper Build Agent",
-    kind: "fallback-report",
-    build: report.build,
-    validation: report.validation,
-    warnings: report.warnings,
-  };
-  return Buffer.from(JSON.stringify(payload), "utf8").toString("base64");
-}
-
-async function tryCreatePobbLink(_pobCode) {
-  throw new Error("pobb.in upload is not enabled until a real PoB export code is produced.");
 }
 
 function findPython() {
@@ -364,6 +372,68 @@ function findPython() {
   return { ok: false, command: "", detail: "Python 3 was not found on PATH." };
 }
 
+async function getBuildAgentStatus() {
+  const node = checkCommand("node", ["--version"], 10_000);
+  const npm = checkCommand("npm", ["--version"], 10_000);
+  const geminiPath = findCommandPath("gemini");
+  const gemini = geminiPath.ok
+    ? { ok: true, command: "gemini", detail: `Gemini CLI found: ${geminiPath.path}` }
+    : { ok: false, command: "gemini", detail: "Gemini CLI was not found on PATH." };
+  const geminiAuth = checkGeminiAuth();
+  const python = findPython();
+  const mcp = python.ok ? checkPoe2Mcp(python.command) : { ok: false, detail: "Python is not available." };
+  const geminiMcp = checkGeminiMcpConfig();
+  const pob = detectPobExecutable();
+  const pobBridge = await checkPobBridge();
+
+  return {
+    ok: node.ok && npm.ok && gemini.ok && geminiAuth.ok && python.ok && mcp.ok && geminiMcp.ok,
+    node,
+    npm,
+    python,
+    gemini,
+    geminiAuth,
+    mcp,
+    geminiMcp,
+    pob,
+    pobBridge,
+  };
+}
+
+function checkGeminiAuth() {
+  if (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GOOGLE_GENAI_API_KEY) {
+    return { ok: true, detail: "Gemini API key environment variable is present." };
+  }
+  return {
+    ok: false,
+    detail: "Gemini OAuth/API key is not verified by status check. Use Login Gemini, then Generate Build will validate the session.",
+  };
+}
+
+function checkCommand(command, args = ["--version"], timeout = 10_000) {
+  const result = spawnSync(command, args, { encoding: "utf8", shell: process.platform === "win32", timeout });
+  if (result.status === 0) {
+    return {
+      ok: true,
+      command,
+      detail: `${command}: ${(result.stdout || result.stderr).trim() || "available"}`,
+    };
+  }
+  if (result.error?.code === "ETIMEDOUT") {
+    return { ok: false, command, detail: `${command} check timed out after ${timeout / 1000}s.` };
+  }
+  return { ok: false, command, detail: `${command} is not available.` };
+}
+
+function findCommandPath(command) {
+  const finder = process.platform === "win32" ? "where.exe" : "which";
+  const result = spawnSync(finder, [command], { encoding: "utf8", shell: false, timeout: 10_000 });
+  if (result.status === 0) {
+    return { ok: true, path: (result.stdout || "").split(/\r?\n/).find(Boolean) || command };
+  }
+  return { ok: false, path: "" };
+}
+
 function checkPoe2Mcp(pythonCommand) {
   const args = pythonCommand === "py"
     ? ["-3", "-c", "import importlib.metadata as m; print(m.version('poe2-mcp'))"]
@@ -374,15 +444,447 @@ function checkPoe2Mcp(pythonCommand) {
   }
   return {
     ok: false,
-    detail: "poe2-mcp is not installed. Run: pip install poe2-mcp",
+    detail: "poe2-mcp is not installed. Use Install poe2-mcp to clone HivemindOverlord/poe2-mcp and install it locally.",
   };
 }
 
-function cleanupBuildJobs() {
+function checkGeminiMcpConfig() {
+  const result = spawnSync("gemini", ["mcp", "list"], {
+    encoding: "utf8",
+    shell: process.platform === "win32",
+    timeout: 30_000,
+  });
+  const output = `${result.stdout || ""}${result.stderr || ""}`.trim();
+  if (result.status === 0 && output.includes(geminiMcpServerName)) {
+    return { ok: true, serverName: geminiMcpServerName, detail: `${geminiMcpServerName} configured. ${output}` };
+  }
+  if (result.status === 0) {
+    return { ok: false, serverName: geminiMcpServerName, detail: output || `${geminiMcpServerName} is not configured.` };
+  }
+  if (result.error?.code === "ETIMEDOUT") {
+    return { ok: false, serverName: geminiMcpServerName, detail: "gemini mcp list timed out." };
+  }
+  return { ok: false, serverName: geminiMcpServerName, detail: output || "Unable to list Gemini MCP servers." };
+}
+
+function detectPobExecutable() {
+  const envPath = process.env.POE_SNIPER_POB_PATH;
+  const portableExe = findPobExecutableInDir(pobPortableDir);
+  const candidates = [
+    envPath,
+    portableExe,
+    join(rootDir, "PathOfBuilding.exe"),
+    join(rootDir, "PathOfBuilding-PoE2", "Path of Building.exe"),
+    join(rootDir, "PathOfBuilding-PoE2", "PathOfBuilding.exe"),
+    join(rootDir, "Path of Building.exe"),
+    join(homedir(), "Documents", "PathOfBuilding-PoE2", "Path of Building.exe"),
+    join(homedir(), "Documents", "PathOfBuilding-PoE2", "PathOfBuilding.exe"),
+    join(homedir(), "Downloads", "PathOfBuilding-PoE2", "Path of Building.exe"),
+    join(homedir(), "Downloads", "PathOfBuilding-PoE2", "PathOfBuilding.exe"),
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      return { ok: true, path: candidate, detail: `Path of Building found: ${candidate}` };
+    }
+  }
+  return {
+    ok: false,
+    path: "",
+    detail: "Path of Building executable was not found. Set POE_SNIPER_POB_PATH to the PoB exe path.",
+  };
+}
+
+function findPobExecutableInDir(dir) {
+  if (!existsSync(dir)) return "";
+  const stack = [dir];
+  while (stack.length) {
+    const current = stack.pop();
+    let entries = [];
+    try {
+      entries = readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const fullPath = join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(fullPath);
+      } else if (/^(Path of Building|PathOfBuilding).*\.exe$/i.test(entry.name)) {
+        return fullPath;
+      }
+    }
+  }
+  return "";
+}
+
+function checkPobBridge() {
+  return new Promise((resolvePromise) => {
+    const socket = new Socket();
+    let settled = false;
+    const done = (value) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolvePromise(value);
+    };
+    socket.setTimeout(1500);
+    socket.once("connect", () => done({ ok: true, detail: "PoB live bridge reachable at 127.0.0.1:49085." }));
+    socket.once("timeout", () => done({ ok: false, detail: "PoB live bridge not reachable at 127.0.0.1:49085." }));
+    socket.once("error", () => done({ ok: false, detail: "PoB live bridge not reachable at 127.0.0.1:49085." }));
+    socket.connect(49085, "127.0.0.1");
+  });
+}
+
+function cleanupJobs() {
   const cutoff = Date.now() - 60 * 60_000;
   for (const [id, job] of buildJobs.entries()) {
     if (job.createdAt < cutoff) buildJobs.delete(id);
   }
+  for (const [id, job] of setupJobs.entries()) {
+    if (job.createdAt < cutoff) setupJobs.delete(id);
+  }
+}
+
+function runLoggedCommand(job, command, args, options = {}) {
+  const timeoutMs = options.timeoutMs || 120_000;
+  return new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn(command, args, {
+      cwd: rootDir,
+      shell: process.platform === "win32",
+      windowsHide: true,
+    });
+    const timer = setTimeout(() => {
+      child.kill();
+      rejectPromise(new Error(`${command} ${args.join(" ")} timed out after ${Math.round(timeoutMs / 1000)}s.`));
+    }, timeoutMs);
+    child.stdout?.on("data", chunk => appendOutputLines(job, "info", chunk));
+    child.stderr?.on("data", chunk => appendOutputLines(job, "warn", chunk));
+    child.on("error", error => {
+      clearTimeout(timer);
+      rejectPromise(error);
+    });
+    child.on("close", code => {
+      clearTimeout(timer);
+      if (code === 0) {
+        appendBuildLog(job, "ok", `${command} ${args.join(" ")} completed.`);
+        resolvePromise();
+      } else {
+        rejectPromise(new Error(`${command} ${args.join(" ")} exited with code ${code}.`));
+      }
+    });
+  });
+}
+
+function getGeminiMcpAddArgs() {
+  const base = ["mcp", "add", "--scope", "project", "--trust", geminiMcpServerName];
+  if (existsSync(poe2McpLaunchPath)) {
+    return [...base, "py", "-3", poe2McpLaunchPath];
+  }
+  return [...base, geminiMcpCommand];
+}
+
+function escapePowerShellString(value) {
+  return String(value).replace(/'/g, "''");
+}
+
+function appendOutputLines(job, level, chunk) {
+  String(chunk).split(/\r?\n/).map(line => line.trim()).filter(Boolean).forEach(line => appendBuildLog(job, level, line));
+}
+
+function openVisibleTerminal(command) {
+  if (process.platform === "win32") {
+    const child = spawn("cmd.exe", ["/c", "start", "Gemini Login", "cmd.exe", "/k", command], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: false,
+    });
+    child.unref();
+    return;
+  }
+  const terminal = process.platform === "darwin" ? "open" : "x-terminal-emulator";
+  const args = process.platform === "darwin" ? ["-a", "Terminal", command] : ["-e", command];
+  const child = spawn(terminal, args, { detached: true, stdio: "ignore" });
+  child.unref();
+}
+
+function runGeminiBuild(job, prompt, rawAgentEvents) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    let stdout = "";
+    let stderr = "";
+    const args = [
+      "--allowed-mcp-server-names", geminiMcpServerName,
+      "--output-format", "stream-json",
+      "-p", prompt,
+    ];
+    const child = spawn("gemini", args, {
+      cwd: rootDir,
+      shell: process.platform === "win32",
+      windowsHide: true,
+    });
+    const timer = setTimeout(() => {
+      child.kill();
+      rejectPromise(new Error("Gemini build generation timed out after 10 minutes."));
+    }, 10 * 60_000);
+
+    child.stdout?.on("data", chunk => {
+      const text = String(chunk);
+      stdout += text;
+      for (const line of text.split(/\r?\n/).filter(Boolean)) {
+        handleGeminiStreamLine(job, line, rawAgentEvents);
+      }
+    });
+    child.stderr?.on("data", chunk => {
+      const text = String(chunk);
+      stderr += text;
+      appendOutputLines(job, "warn", text);
+    });
+    child.on("error", error => {
+      clearTimeout(timer);
+      rejectPromise(error);
+    });
+    child.on("close", code => {
+      clearTimeout(timer);
+      if (code === 0) {
+        resolvePromise(stdout);
+      } else {
+        rejectPromise(new Error(`Gemini exited with code ${code}. ${stderr.trim()}`));
+      }
+    });
+  });
+}
+
+function handleGeminiStreamLine(job, line, rawAgentEvents) {
+  try {
+    const event = JSON.parse(line);
+    rawAgentEvents.push(event);
+    const type = String(event.type || event.event || "event");
+    if (type === "tool_use") {
+      const name = event.name || event.tool_name || event.toolUse?.name || "tool";
+      appendBuildLog(job, "info", `tool_use: ${name}`);
+    } else if (type === "tool_result") {
+      const name = event.name || event.tool_name || event.toolResult?.name || "tool";
+      appendBuildLog(job, "ok", `tool_result: ${name}`);
+    } else if (type === "error") {
+      appendBuildLog(job, "warn", `gemini error: ${event.message || JSON.stringify(event).slice(0, 260)}`);
+    } else if (type === "message") {
+      const text = event.message || event.text || event.delta || event.content;
+      if (typeof text === "string" && text.trim()) appendBuildLog(job, "info", text.trim().slice(0, 500));
+    }
+  } catch {
+    appendBuildLog(job, "info", line.slice(0, 500));
+  }
+}
+
+function createGeminiBuildPrompt(payload) {
+  const goal = String(payload.goal || "").trim();
+  const characterClass = String(payload.characterClass || "Any realistic class").trim();
+  const ascendancy = String(payload.ascendancy || "Any realistic ascendancy").trim();
+  const budget = String(payload.budget || "20-50 divine").trim();
+  const league = String(payload.league || "current POE2 trade league").trim();
+  return `You are the POE2 Sniper Build Agent. Use the configured MCP server named ${geminiMcpServerName} / poe2-optimizer for PoE2 validation and PoB export.
+
+Goal: ${goal}
+Class constraint: ${characterClass}
+Ascendancy constraint: ${ascendancy}
+Budget constraint: ${budget}
+League: ${league}
+
+Hard rules:
+- You MUST use poe2-mcp tools where applicable to validate skills/supports, passives/keystones, base items, item mods, and build constraints.
+- You MUST reject impossible/god-gear assumptions. Rare items must be attainable, not perfect all-T1 fantasy gear.
+- You MUST use poe.ninja/build or MCP market/ladder evidence when available to keep the archetype realistic.
+- You MUST export a real Path of Building code using MCP/PoB export/import tools. Do not invent or base64-encode a report.
+- If you cannot produce a real PoB export code, return validation.status "failed" and pobCode "".
+- Return ONLY valid JSON, no Markdown fences.
+
+JSON schema:
+{
+  "assumptions": ["string"],
+  "pobCode": "real PoB export code or empty string",
+  "pobCodeSource": "mcp_export|pob_live_bridge|none",
+  "mcpToolsUsed": ["tool names"],
+  "build": {
+    "name": "string",
+    "class": "string",
+    "ascendancy": "string",
+    "mainSkill": "string",
+    "defenses": ["string"],
+    "targetMetrics": {"ehp": "string", "dps": "string"},
+    "gearPlan": ["string"],
+    "skillLinks": ["string"],
+    "passivePlan": ["string"]
+  },
+  "validation": {
+    "status": "validated|estimated|failed",
+    "reason": "string",
+    "metrics": {"key": "value"}
+  },
+  "validatedMetrics": {"key": "value"},
+  "estimatedMetrics": {"key": "value"},
+  "marketEvidence": ["string"],
+  "rejectedIdeas": ["string"],
+  "warnings": ["string"]
+}`;
+}
+
+function extractAgentJson(stdout) {
+  const resultEvent = stdout.split(/\r?\n/).reverse().map(line => {
+    try { return JSON.parse(line); } catch { return null; }
+  }).find(event => event && (event.type === "result" || event.response));
+  const responseText = resultEvent?.response || resultEvent?.result?.response || stdout;
+  if (typeof responseText === "object" && responseText) return responseText;
+  const text = String(responseText);
+  const fenced = text.match(/```json\s*([\s\S]*?)```/i) || text.match(/```\s*([\s\S]*?)```/i);
+  const candidate = fenced ? fenced[1] : text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1);
+  return JSON.parse(candidate);
+}
+
+function isLikelyPobCode(code) {
+  return /^[A-Za-z0-9+/_=-]{200,}$/.test(code.trim());
+}
+
+function normalizeBuildAgentResult(payload, agentJson, context) {
+  const validation = agentJson.validation && typeof agentJson.validation === "object"
+    ? agentJson.validation
+    : { status: "estimated", reason: "Gemini returned no validation object." };
+  return {
+    goal: String(payload.goal || ""),
+    generatedAt: new Date().toISOString(),
+    provider: "gemini",
+    mcpToolsUsed: asStringArray(agentJson.mcpToolsUsed),
+    pobCodeSource: String(agentJson.pobCodeSource || "mcp_export"),
+    pobbUploadStatus: context.pobbUploadStatus,
+    pobOpenStatus: "",
+    assumptions: asStringArray(agentJson.assumptions),
+    pobLink: context.pobLink,
+    pobCode: context.pobCode,
+    build: agentJson.build || null,
+    validation: {
+      status: ["validated", "estimated", "failed"].includes(validation.status) ? validation.status : "estimated",
+      reason: String(validation.reason || ""),
+      metrics: validation.metrics || {},
+    },
+    validatedMetrics: objectOrEmpty(agentJson.validatedMetrics),
+    estimatedMetrics: objectOrEmpty(agentJson.estimatedMetrics),
+    marketEvidence: asStringArray(agentJson.marketEvidence),
+    rejectedIdeas: asStringArray(agentJson.rejectedIdeas),
+    rawAgentEvents: context.rawAgentEvents,
+    logs: context.logs,
+    warnings: context.warnings,
+  };
+}
+
+function failedBuildResult(payload, reason, logs) {
+  return {
+    goal: String(payload.goal || ""),
+    generatedAt: new Date().toISOString(),
+    provider: "gemini",
+    mcpToolsUsed: [],
+    pobCodeSource: "none",
+    pobbUploadStatus: "not_attempted",
+    pobOpenStatus: "",
+    assumptions: [],
+    pobLink: "",
+    pobCode: "",
+    build: null,
+    validation: { status: "failed", reason },
+    validatedMetrics: {},
+    estimatedMetrics: {},
+    marketEvidence: [],
+    rejectedIdeas: [],
+    rawAgentEvents: [],
+    logs: logs.map(log => log.message),
+    warnings: [reason],
+  };
+}
+
+function asStringArray(value) {
+  return Array.isArray(value) ? value.map(item => String(item)) : [];
+}
+
+function objectOrEmpty(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function createPobbLink(pobCode) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const body = JSON.stringify({
+      as_user: false,
+      content: pobCode,
+      title: "",
+      custom_id: "",
+      id: null,
+      pinned: false,
+      private: false,
+    });
+    const req = httpsRequest(
+      {
+        protocol: "https:",
+        hostname: "pobb.in",
+        method: "POST",
+        path: "/api/internal/paste/",
+        headers: {
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(body),
+          "user-agent": "POE2 Sniper Launcher (local app)",
+          "accept": "application/json, text/plain",
+        },
+      },
+      (res) => {
+        let responseBody = "";
+        res.setEncoding("utf8");
+        res.on("data", chunk => { responseBody += chunk; });
+        res.on("end", () => {
+          if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+            rejectPromise(new Error(`pobb.in returned ${res.statusCode}: ${responseBody.slice(0, 180)}`));
+            return;
+          }
+          const id = parsePobbId(responseBody);
+          if (!id) {
+            rejectPromise(new Error(`pobb.in response did not include a paste id: ${responseBody.slice(0, 180)}`));
+            return;
+          }
+          resolvePromise(`https://pobb.in/${id}`);
+        });
+      },
+    );
+    req.on("error", rejectPromise);
+    req.write(body);
+    req.end();
+  });
+}
+
+function parsePobbId(body) {
+  try {
+    const parsed = JSON.parse(body);
+    if (typeof parsed === "string") return parsed.replace(/^"|"$/g, "");
+    if (parsed?.id) return String(parsed.id);
+    if (parsed?.Paste) return String(parsed.Paste);
+  } catch {
+    const trimmed = body.trim();
+    if (/^[A-Za-z0-9_-]{6,32}$/.test(trimmed)) return trimmed;
+  }
+  return "";
+}
+
+function copyToClipboard(text) {
+  if (!text) return Promise.resolve({ ok: false, detail: "Nothing to copy." });
+  if (process.platform !== "win32") return Promise.resolve({ ok: false, detail: "Clipboard helper is only implemented for Windows." });
+  return new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn("powershell.exe", ["-NoProfile", "-Command", "$input | Set-Clipboard"], {
+      stdio: ["pipe", "ignore", "pipe"],
+      windowsHide: true,
+    });
+    let stderr = "";
+    child.stderr?.on("data", chunk => { stderr += String(chunk); });
+    child.on("error", rejectPromise);
+    child.on("close", code => {
+      if (code === 0) resolvePromise({ ok: true, detail: "Copied to clipboard." });
+      else rejectPromise(new Error(stderr.trim() || `Set-Clipboard exited with code ${code}`));
+    });
+    child.stdin.end(text);
+  });
 }
 
 async function handleLocalNotify(clientReq, clientRes) {

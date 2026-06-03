@@ -1198,6 +1198,56 @@ html, body, #root {
   padding: 12px;
 }
 
+.build-runtime-card {
+  margin-bottom: 12px;
+}
+
+.build-runtime-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.runtime-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 8px;
+}
+
+.runtime-item {
+  min-height: 72px;
+  padding: 9px 10px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-dim);
+  border-radius: var(--radius-sm);
+}
+
+.runtime-item strong {
+  display: block;
+  margin-bottom: 4px;
+  font-family: 'Cinzel', serif;
+  font-size: 11px;
+  color: var(--gold);
+  text-transform: uppercase;
+}
+
+.runtime-item span {
+  display: block;
+  color: var(--text-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.runtime-ok {
+  border-color: rgba(65, 195, 110, 0.4);
+}
+
+.runtime-missing {
+  border-color: rgba(239, 83, 80, 0.55);
+}
+
 .build-log-card {
   min-height: 360px;
 }
@@ -1238,6 +1288,11 @@ html, body, #root {
 .log-ok strong { color: var(--price-good); }
 .log-warn strong { color: var(--price-warn); }
 .log-error strong { color: var(--price-alert); }
+
+.watch-success {
+  color: var(--price-good);
+  font-size: 12px;
+}
 
 .build-actions {
   display: flex;
