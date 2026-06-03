@@ -238,6 +238,7 @@ export interface AppSettings {
   pollIntervalMs: number;   // default 10000 (10s)
   maxWatches: number;       // default 3
   automationMode: "auto" | "report"; // default global mode
+  keepAwake: boolean;
 }
 
 export interface StatMeta {

@@ -1,8 +1,9 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useAppState, type PricePoint } from "../store/appStore";
 import { travelToHideout } from "../api/tradeClient";
 import type { ListingResult } from "../types/trade";
 import { getItemMetrics } from "../utils/itemDisplay";
+import { formatDivineEquivalent, isListingAtOrBelowThreshold } from "../utils/pricingEngine";
 
 const POLL_OPTIONS = [5_000, 10_000, 20_000, 30_000, 60_000];
 const STRATEGIES = [
@@ -16,6 +17,27 @@ const STRATEGIES = [
 export function WatchList() {
   const { state, pauseWatch, resumeWatch, removeWatch, updateWatch } = useAppState();
   const [travelingId, setTravelingId] = useState("");
+  const [draftThresholds, setDraftThresholds] = useState<Record<string, { amount: string; currency: string }>>({});
+
+  useEffect(() => {
+    setDraftThresholds(prev => {
+      const next = { ...prev };
+      for (const watch of state.watches) {
+        if (!next[watch.id]) {
+          next[watch.id] = {
+            amount: String(watch.threshold.amount),
+            currency: watch.threshold.currency,
+          };
+        }
+      }
+      for (const id of Object.keys(next)) {
+        if (!state.watches.some(watch => watch.id === id)) {
+          delete next[id];
+        }
+      }
+      return next;
+    });
+  }, [state.watches]);
 
   const handleActivate = (id: string) => {
     const result = resumeWatch(id);
@@ -37,6 +59,24 @@ export function WatchList() {
     }
   };
 
+  const handleApplyThreshold = (id: string) => {
+    const draft = draftThresholds[id];
+    const amount = Number(draft?.amount);
+    if (!draft || !Number.isFinite(amount) || amount <= 0) {
+      alert("Enter a valid positive threshold.");
+      return;
+    }
+    const result = updateWatch(id, {
+      threshold: {
+        amount,
+        currency: draft.currency,
+      },
+    });
+    if (!result.ok) {
+      alert(result.error || "Could not update threshold.");
+    }
+  };
+
   return (
     <div className="watches-container">
       <div className="panel-title">Watches</div>
@@ -51,9 +91,15 @@ export function WatchList() {
       <div className="watch-dashboard-list">
         {state.watches.map(w => {
           const live = state.liveResults[w.id];
+          const draft = draftThresholds[w.id] || {
+            amount: String(w.threshold.amount),
+            currency: w.threshold.currency,
+          };
+          const thresholdDirty =
+            draft.amount !== String(w.threshold.amount) ||
+            draft.currency !== w.threshold.currency;
           const found = (live?.listings || []).filter(listing =>
-            listing.listing.price.currency === w.threshold.currency &&
-            listing.listing.price.amount <= w.threshold.amount
+            isListingAtOrBelowThreshold(listing, w.threshold, state.marketSnapshot)
           );
           const history = live?.priceHistory || [];
 
@@ -72,19 +118,21 @@ export function WatchList() {
                     <input
                       type="number"
                       min={0}
-                      value={w.threshold.amount}
-                      onChange={e => updateWatch(w.id, {
-                        threshold: { ...w.threshold, amount: Number(e.target.value) || 0 },
-                      })}
+                      value={draft.amount}
+                      onChange={e => setDraftThresholds(prev => ({
+                        ...prev,
+                        [w.id]: { ...draft, amount: e.target.value },
+                      }))}
                     />
                   </label>
                   <label className="watch-control">
                     <span>Currency</span>
                     <select
-                      value={w.threshold.currency}
-                      onChange={e => updateWatch(w.id, {
-                        threshold: { ...w.threshold, currency: e.target.value },
-                      })}
+                      value={draft.currency}
+                      onChange={e => setDraftThresholds(prev => ({
+                        ...prev,
+                        [w.id]: { ...draft, currency: e.target.value },
+                      }))}
                     >
                       <option value="divine">Divine</option>
                       <option value="exalted">Exalted</option>
@@ -139,6 +187,19 @@ export function WatchList() {
                   </label>
                 </div>
 
+                <div className="threshold-apply-row">
+                  <button
+                    className={`btn btn-sm ${thresholdDirty ? "btn-primary" : "btn-ghost"}`}
+                    onClick={() => handleApplyThreshold(w.id)}
+                    disabled={!thresholdDirty}
+                  >
+                    Apply Target
+                  </button>
+                  <span>
+                    Active target: {w.threshold.amount} {w.threshold.currency}
+                  </span>
+                </div>
+
                 <div className="watch-live">
                   {live?.error ? (
                     <div className="watch-error">{live.error}</div>
@@ -175,6 +236,9 @@ export function WatchList() {
                             <div className="found-name">{listing.item.name || listing.item.typeLine}</div>
                             <div className="found-price">
                               {listing.listing.price.amount} {listing.listing.price.currency}
+                              {listing.listing.price.currency !== w.threshold.currency && (
+                                <span className="found-price-eq"> {formatDivineEquivalent(listing, state.marketSnapshot)}</span>
+                              )}
                             </div>
                             <div className="found-metrics">
                               {getItemMetrics(listing.item).slice(0, 8).map(metric => (

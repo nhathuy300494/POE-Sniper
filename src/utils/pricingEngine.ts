@@ -110,6 +110,42 @@ export function convertPriceToDivine(amount: number, currency: string, market: M
   return 0;
 }
 
+export function isListingAtOrBelowThreshold(
+  listing: ListingResult,
+  threshold: { amount: number; currency: string },
+  market: MarketSnapshot | null
+) {
+  const listingCurrency = listing.listing.price.currency.toLowerCase();
+  const thresholdCurrency = threshold.currency.toLowerCase();
+
+  if (listingCurrency === thresholdCurrency) {
+    return listing.listing.price.amount <= threshold.amount;
+  }
+
+  const listingDivine = convertPriceToDivine(
+    listing.listing.price.amount,
+    listing.listing.price.currency,
+    market
+  );
+  const thresholdDivine = convertPriceToDivine(
+    threshold.amount,
+    threshold.currency,
+    market
+  );
+
+  if (!listingDivine || !thresholdDivine) return false;
+  return listingDivine <= thresholdDivine;
+}
+
+export function formatDivineEquivalent(listing: ListingResult, market: MarketSnapshot | null) {
+  const divine = convertPriceToDivine(
+    listing.listing.price.amount,
+    listing.listing.price.currency,
+    market
+  );
+  return divine ? `${divine.toFixed(2)}d eq` : "";
+}
+
 function getLiveFloorDivine(listing: ListingResult, liveListings: ListingResult[], market: MarketSnapshot | null) {
   const comparable = liveListings
     .filter(item => isComparable(listing, item))

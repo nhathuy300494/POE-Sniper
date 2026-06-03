@@ -7,6 +7,7 @@ export function SettingsPanel() {
   const [session, setSession] = useState(state.settings.poesessid);
   const [league, setLeague] = useState(state.settings.league);
   const [interval, setInterval] = useState(state.settings.pollIntervalMs / 1000);
+  const [keepAwake, setKeepAwake] = useState(state.settings.keepAwake);
   const [cookieWarning, setCookieWarning] = useState("");
   const [showCookies, setShowCookies] = useState(!state.settings.poesessid);
 
@@ -22,6 +23,7 @@ export function SettingsPanel() {
       poesessid: cookieHeader,
       league: league,
       pollIntervalMs: interval * 1000,
+      keepAwake,
     });
     setSession(cookieHeader);
     setShowCookies(false);
@@ -79,6 +81,24 @@ export function SettingsPanel() {
           onChange={e => setInterval(parseInt(e.target.value))}
         />
         <p className="field-help">Lower = faster snipes, but higher risk of rate limits.</p>
+      </div>
+
+      <div className="settings-section">
+        <div className="settings-section-title">Runtime</div>
+        <label className="toggle-row">
+          <input
+            type="checkbox"
+            checked={keepAwake}
+            onChange={e => setKeepAwake(e.target.checked)}
+          />
+          <span>
+            <strong>Keep app awake while polling</strong>
+            <small>Uses Chrome Screen Wake Lock so polling is less likely to pause while you are in game.</small>
+          </span>
+        </label>
+        <p className="field-help">
+          Alerts use a launcher topmost popup with Travel/Dismiss. For longest sessions, keep this browser window open and exclude this site from Chrome Memory Saver.
+        </p>
       </div>
 
       <button className="btn btn-primary btn-full" onClick={handleSave}>

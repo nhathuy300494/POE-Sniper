@@ -1,5 +1,6 @@
 import { searchItems, fetchItems, travelToHideout } from "./tradeClient";
-import type { WatchConfig, ListingResult } from "../types/trade";
+import type { WatchConfig, ListingResult, MarketSnapshot } from "../types/trade";
+import { isListingAtOrBelowThreshold } from "../utils/pricingEngine";
 
 export type WatchEvent =
   | { type: "result"; watchId: string; listings: ListingResult[]; cheapest: ListingResult | null }
@@ -21,11 +22,13 @@ class WatcherEngine {
   private listeners: ((event: WatchEvent) => void)[] = [];
   private poesessid = "";
   private pollIntervalMs = 10_000;
+  private marketSnapshot: MarketSnapshot | null = null;
   private readonly searchBudgetPerMinute = 10;
 
-  configure(settings: { poesessid: string; pollIntervalMs: number }) {
+  configure(settings: { poesessid: string; pollIntervalMs: number; marketSnapshot?: MarketSnapshot | null }) {
     this.poesessid = settings.poesessid;
     this.pollIntervalMs = settings.pollIntervalMs;
+    this.marketSnapshot = settings.marketSnapshot ?? null;
   }
 
   on(cb: (event: WatchEvent) => void) {
@@ -158,8 +161,7 @@ class WatcherEngine {
       this.emit({ type: "result", watchId: id, listings, cheapest });
 
       const thresholdHit = listings.find(listing =>
-        listing.listing.price.currency === watch.config.threshold.currency &&
-        listing.listing.price.amount <= watch.config.threshold.amount &&
+        isListingAtOrBelowThreshold(listing, watch.config.threshold, this.marketSnapshot) &&
         !watch.triggeredListingIds.has(listing.id)
       );
 

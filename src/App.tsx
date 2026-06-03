@@ -7,7 +7,9 @@ import { OpportunitiesPanel } from "./components/OpportunitiesPanel";
 import { LedgerPanel } from "./components/LedgerPanel";
 import { AlertPanel } from "./components/AlertPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { KeepAwakeGuard } from "./components/KeepAwakeGuard";
 import { travelToHideout } from "./api/tradeClient";
+import { showTopmostAlert } from "./api/localNotifier";
 import "./styles/app.css";
 
 type Tab = "search" | "watches" | "opportunities" | "ledger" | "alerts" | "settings";
@@ -69,6 +71,7 @@ export default function App() {
             <SettingsPanel />
           </div>
         </main>
+        <KeepAwakeGuard />
         <AlertToast />
       </div>
     </AppProvider>
@@ -79,6 +82,12 @@ function AlertToast() {
   const { state, dispatch } = useAppState();
   const [loading, setLoading] = useState(false);
   const alert = state.alerts.find(a => !a.dismissed);
+
+  React.useEffect(() => {
+    if (alert && state.settings.poesessid) {
+      void showTopmostAlert(alert.listing, state.settings.poesessid);
+    }
+  }, [alert?.id]);
 
   if (!alert) return null;
 

@@ -65,6 +65,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   pollIntervalMs: 10_000,
   maxWatches: 3,
   automationMode: "report",
+  keepAwake: true,
 };
 
 // ─── Actions ──────────────────────────────────────────────────────────────────
@@ -331,8 +332,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     watcherEngine.configure({
       poesessid: state.settings.poesessid,
       pollIntervalMs: state.settings.pollIntervalMs,
+      marketSnapshot: state.marketSnapshot,
     });
-  }, [state.settings]);
+  }, [state.settings, state.marketSnapshot]);
 
   useEffect(() => {
     persistWatches(state.watches);
@@ -678,6 +680,7 @@ function showDesktopNotification(watchId: string, listing: ListingResult) {
       body: `${listing.item.name || listing.item.typeLine} — ${price.amount} ${price.currency}\nSeller: ${listing.listing.account.lastCharacterName}`,
       icon: listing.item.icon,
       tag: watchId,
+      requireInteraction: true,
     });
   };
 

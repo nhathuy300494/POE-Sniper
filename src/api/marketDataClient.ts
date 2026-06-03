@@ -59,8 +59,8 @@ async function fetchMarketType(
   if (!res.ok) throw new Error(`poe.ninja ${meta.type} failed: ${res.status}`);
   const data = await res.json();
 
-  const rates = normalizeRates(data.core?.rates || {});
   const core = data.core || {};
+  const rates = normalizeRates(core);
   const now = Date.now();
 
   if (meta.endpoint === "exchange") {
@@ -116,9 +116,10 @@ function normalizeMarketPrice(price: MarketPrice): MarketPrice {
   };
 }
 
-function normalizeRates(rates: Record<string, number>) {
+function normalizeRates(core: { primary?: string; rates?: Record<string, number> }) {
   const normalized: Record<string, number> = { divine: 1 };
-  for (const [currency, rate] of Object.entries(rates)) {
+  if (core.primary) normalized[core.primary] = 1;
+  for (const [currency, rate] of Object.entries(core.rates || {})) {
     normalized[currency] = Number(rate);
   }
   return normalized;
