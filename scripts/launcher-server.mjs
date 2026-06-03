@@ -722,11 +722,15 @@ Budget constraint: ${budget}
 League: ${league}
 
 Hard rules:
+- Follow the workspace GEMINI.md instructions, especially the MCP tool budget and anti-spam policy.
+- Use no more than 12 MCP tool calls for this request unless a real PoB export tool explicitly requires follow-up.
+- Use no more than 2 explain_mechanic calls. Do not call explain_mechanic for broad exploration.
 - You MUST use poe2-mcp tools where applicable to validate skills/supports, passives/keystones, base items, item mods, and build constraints.
 - You MUST reject impossible/god-gear assumptions. Rare items must be attainable, not perfect all-T1 fantasy gear.
 - You MUST use poe.ninja/build or MCP market/ladder evidence when available to keep the archetype realistic.
 - You MUST export a real Path of Building code using MCP/PoB export/import tools. Do not invent or base64-encode a report.
 - If you cannot produce a real PoB export code, return validation.status "failed" and pobCode "".
+- If Gemini reports quota/capacity retries, stop broad research and finish with the minimum valid JSON result using already collected evidence.
 - Return ONLY valid JSON, no Markdown fences.
 
 JSON schema:
