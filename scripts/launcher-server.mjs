@@ -645,7 +645,7 @@ function runGeminiBuild(job, prompt, rawAgentEvents) {
     const args = [
       "--allowed-mcp-server-names", geminiMcpServerName,
       "--output-format", "stream-json",
-      "-p", prompt,
+      "--prompt", ".",
     ];
     const child = spawn("gemini", args, {
       cwd: rootDir,
@@ -681,6 +681,7 @@ function runGeminiBuild(job, prompt, rawAgentEvents) {
         rejectPromise(new Error(`Gemini exited with code ${code}. ${stderr.trim()}`));
       }
     });
+    child.stdin?.end(prompt);
   });
 }
 
