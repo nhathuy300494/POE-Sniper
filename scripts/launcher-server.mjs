@@ -22,6 +22,7 @@ const geminiMcpCommand = "poe2-mcp";
 const toolsDir = join(rootDir, "tools");
 const poe2McpSourceDir = join(toolsDir, "poe2-mcp");
 const poe2McpLaunchPath = join(poe2McpSourceDir, "launch.py");
+const poe2McpServerPath = join(poe2McpSourceDir, "src", "mcp_server.py");
 const pobPortableDir = join(toolsDir, "PathOfBuilding-PoE2");
 const pobPortableZip = join(toolsDir, "PathOfBuildingCommunity-PoE2-Portable.zip");
 const pobPortableUrl = "https://github.com/PathOfBuildingCommunity/PathOfBuilding-PoE2/releases/download/v0.17.1/PathOfBuildingCommunity-PoE2-Portable.zip";
@@ -372,6 +373,22 @@ function findPython() {
   return { ok: false, command: "", detail: "Python 3 was not found on PATH." };
 }
 
+function findPythonExecutable() {
+  const launcher = spawnSync("py", ["-3", "-c", "import sys; print(sys.executable)"], {
+    encoding: "utf8",
+    shell: false,
+    timeout: 10_000,
+  });
+  if (launcher.status === 0 && launcher.stdout.trim()) return launcher.stdout.trim();
+  const direct = spawnSync(process.platform === "win32" ? "python" : "python3", ["-c", "import sys; print(sys.executable)"], {
+    encoding: "utf8",
+    shell: false,
+    timeout: 10_000,
+  });
+  if (direct.status === 0 && direct.stdout.trim()) return direct.stdout.trim();
+  return "";
+}
+
 async function getBuildAgentStatus() {
   const node = checkCommand("node", ["--version"], 10_000);
   const npm = checkCommand("npm", ["--version"], 10_000);
@@ -387,7 +404,7 @@ async function getBuildAgentStatus() {
   const pobBridge = await checkPobBridge();
 
   return {
-    ok: node.ok && npm.ok && gemini.ok && geminiAuth.ok && python.ok && mcp.ok && geminiMcp.ok,
+    ok: node.ok && npm.ok && gemini.ok && python.ok && mcp.ok && geminiMcp.ok,
     node,
     npm,
     python,
@@ -510,7 +527,7 @@ function findPobExecutableInDir(dir) {
       const fullPath = join(current, entry.name);
       if (entry.isDirectory()) {
         stack.push(fullPath);
-      } else if (/^(Path of Building|PathOfBuilding).*\.exe$/i.test(entry.name)) {
+      } else if (/^(Path of Building|PathOfBuilding|Path\{space\}of\{space\}Building-PoE2).*\.exe$/i.test(entry.name)) {
         return fullPath;
       }
     }
@@ -577,9 +594,22 @@ function runLoggedCommand(job, command, args, options = {}) {
 }
 
 function getGeminiMcpAddArgs() {
-  const base = ["mcp", "add", "--scope", "project", "--trust", geminiMcpServerName];
+  const base = [
+    "mcp", "add",
+    "--scope", "project",
+    "--trust",
+    "-e", "SECRET_KEY=poe-sniper-local-dev-secret-key",
+    "-e", "ENCRYPTION_KEY=poe-sniper-local-dev-encryption-key",
+    "-e", "ENABLE_TRADE_INTEGRATION=false",
+    geminiMcpServerName,
+  ];
+  if (existsSync(poe2McpServerPath)) {
+    const pythonPath = findPythonExecutable();
+    return [...base, pythonPath || "python", poe2McpServerPath];
+  }
   if (existsSync(poe2McpLaunchPath)) {
-    return [...base, "py", "-3", poe2McpLaunchPath];
+    const pythonPath = findPythonExecutable();
+    return [...base, pythonPath || "python", poe2McpLaunchPath];
   }
   return [...base, geminiMcpCommand];
 }

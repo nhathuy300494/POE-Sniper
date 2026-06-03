@@ -1,6 +1,7 @@
 node_modules/
 dist/
 tools/
+.gemini/
 .env
 .DS_Store
 *.local
